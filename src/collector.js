@@ -31,7 +31,7 @@
   const PAINT_STABLE_SAMPLES = 2;
   const MAX_PAINT_WAIT_MS = 1600;
   const MIN_FEED_FILL = 0.7;
-  const BURST_LAG_LIMIT = 3;
+  const BURST_LAG_LIMIT = 4;
   const LANDING_MIN_RATIO = 0.05;
   const LANDING_MAX_RATIO = 0.4;
   // Longer posts hold the eye longer, up to a point.
@@ -902,10 +902,14 @@
   }
   const hasLayout = () => document.documentElement.getBoundingClientRect().height > 0;
 
-  const isEligible = (view) =>
-    !view ||
-    (view.top < view.height * MAX_TOP_RATIO &&
-      (view.ofPost >= MIN_POST_VISIBLE_RATIO || view.ofViewport >= MIN_VIEWPORT_FILL_RATIO));
+  const isOnScreenEnough = (view) =>
+    view.top < view.height * MAX_TOP_RATIO &&
+    (view.ofPost >= MIN_POST_VISIBLE_RATIO || view.ofViewport >= MIN_VIEWPORT_FILL_RATIO);
+  const isEligible = (view) => !view || isOnScreenEnough(view);
+  // A post that has already moved above the viewport is still ours if the node
+  // is in the document. Skipping it to take a later in-view post is how a
+  // burst overshoots and a thread never gets a harvest.
+  const shouldCollect = (view) => !view || view.top < 0 || isOnScreenEnough(view);
   function syncRendered() {
     const rendered = new Map();
     const measure = hasLayout();
@@ -982,11 +986,13 @@
     for (const [element, view] of map) {
       if (visited.has(element) || !element.isConnected) continue;
       if (!atOrAfterFrontier(element, frontier)) continue;
-      if (!isEligible(view)) continue;
       const permalink = S.getPermalink(element);
       if (threadDone(element, permalink)) continue;
       // A post that failed once is not skipped: it is first in line next pass.
       if (attemptsFor(element, permalink) >= MAX_THREAD_ATTEMPTS) continue;
+      // Not on screen yet. Stop here so a later post does not become the
+      // frontier and strand this one.
+      if (!shouldCollect(view)) return null;
       return element;
     }
     return null;
@@ -1219,7 +1225,7 @@
         break;
       }
       visited.add(element);
-      if (hasLayout() && !isEligible(visibility(element))) {
+      if (hasLayout() && !shouldCollect(visibility(element))) {
         state.collectAgain = true;
         break;
       }
@@ -1502,7 +1508,7 @@
   async function scrollBurst(deadline) {
     const { sleep, now } = S.motion;
     const ceiling = Math.round(
-      ((window.innerHeight || 0) * BURST_TRAVEL_RATIO) / Math.max(1, S.lag())
+      ((window.innerHeight || 0) * BURST_TRAVEL_RATIO) / Math.min(1.35, Math.max(1, S.lag()))
     );
     const flicks = S.randInt(...BURST_FLICKS);
     let travelled = 0;
@@ -1571,6 +1577,7 @@
       }
     }
 
+    S.resetLag?.();
     const { sleep, now } = S.motion;
     const started = now();
     const deadline = maxSeconds === null ? Infinity : started + maxSeconds * 1000;

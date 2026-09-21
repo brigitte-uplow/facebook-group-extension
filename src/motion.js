@@ -30,16 +30,26 @@
   const randFloat = (min, max) => min + nextRandom() * (max - min);
   const randInt = (min, max) => Math.floor(randFloat(min, max + 1));
   const LAG_SMOOTHING = 0.3;
+  const LAG_RECOVERY = 0.45;
   const MAX_LAG_FACTOR = 4;
   let lagFactor = 1;
 
   const lag = () => lagFactor;
+  function resetLag() {
+    lagFactor = 1;
+  }
   async function pace(ms) {
     const requested = Math.max(1, Math.round(ms));
     const before = motion.now();
     await motion.sleep(requested);
     const actual = motion.now() - before;
-    if (actual <= requested) return;
+    // Short ticks (6–12ms) routinely overshoot by a few milliseconds. Treating
+    // that jitter as lag made later bursts crawl and never recover.
+    const slack = Math.max(8, Math.round(requested * 0.5));
+    if (actual <= requested + slack) {
+      if (lagFactor > 1) lagFactor += (1 - lagFactor) * LAG_RECOVERY;
+      return;
+    }
     const observed = Math.min(MAX_LAG_FACTOR, actual / requested);
     lagFactor += (observed - lagFactor) * LAG_SMOOTHING;
   }
@@ -54,7 +64,7 @@
   function tickCount(total) {
     const drawn = randInt(MIN_TICKS, MAX_TICKS);
     const needed = Math.max(
-      Math.round(drawn * lagFactor),
+      Math.round(drawn * Math.min(lagFactor, 1.5)),
       Math.ceil(Math.abs(Math.round(total)) / MAX_TICK_PX)
     );
     return Math.min(MAX_LAG_TICKS, Math.max(drawn, needed));
@@ -109,6 +119,7 @@
     randFloat,
     randInt,
     lag,
+    resetLag,
     glideBy,
     glideTo,
   });

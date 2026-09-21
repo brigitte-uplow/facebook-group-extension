@@ -24,6 +24,7 @@
     randFloat,
     randInt,
     lag,
+    resetLag,
     glideBy,
     glideTo,
   } = globalThis.__fbGroupMotion;
@@ -333,6 +334,7 @@
     glideBy,
     glideTo,
     lag,
+    resetLag,
     randInt,
     randFloat,
     nextRandom,
