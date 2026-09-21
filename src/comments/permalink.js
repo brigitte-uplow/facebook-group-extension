@@ -76,6 +76,15 @@
     return renderedCommentCount(host) > 0 ? host : null;
   }
 
+  function readComments(scope, scrapedAt) {
+    const host = scope || threadScope();
+    if (!host) return [];
+    const dialogNow = findPostDialog();
+    return getComments(host, 0, scrapedAt, {
+      exclude: dialogNow ? [dialogPostArticle(dialogNow)].filter(Boolean) : [],
+    }).comments;
+  }
+
   async function scrapePermalinkComments(options = {}) {
     const {
       target = 100,
@@ -161,10 +170,23 @@
     result.exhausted = outcome.exhausted;
     scope = threadScope() || scope;
     await expandCommentText(scope);
-    const dialogNow = findPostDialog();
-    result.comments = getComments(scope, 0, scrapedAt, {
-      exclude: dialogNow ? [dialogPostArticle(dialogNow)].filter(Boolean) : [],
-    }).comments;
+    result.comments = readComments(scope, scrapedAt);
+    // The dialog's articles land before their text. A shell counts as rendered,
+    // and getComments drops an article with no body, so a thread that is still
+    // painting would be stored as empty. Wait out the same budget for a body.
+    if (!result.comments.length && tally > 0 && outcome.rendered > 0) {
+      const deadline = Date.now() + maxSeconds * 1000;
+      while (!result.comments.length && Date.now() < deadline) {
+        const left = deadline - Date.now();
+        await waitUntil(() => {
+          const host = threadScope();
+          return host && readComments(host, scrapedAt).length ? host : null;
+        }, Math.min(4000, left));
+        scope = threadScope() || scope;
+        await expandCommentText(scope);
+        result.comments = readComments(scope, scrapedAt);
+      }
+    }
     // A post Facebook says has comments, read as having none, is a page that did
     // not render rather than a thread that is empty — a tab the desktop never
     // painted, or a permalink that answered with something other than the post.

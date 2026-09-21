@@ -6,6 +6,9 @@ try {
 
 importScripts("/src/parse-tool-content.js");
 const MAX_CAPTURES_PER_INGEST = 25;
+// Back-to-back batches of a finished run are what Vercel's DDoS mitigation
+// counts. A gap keeps the same batches under that threshold.
+const INGEST_GAP_MS = 3000;
 
 // The scraper's halves, in the order they publish the globals each next one
 // reads. Matches popup.js CONTENT_SCRIPTS, minus collector.js: the worker tab
@@ -122,14 +125,23 @@ async function callTool(name, args) {
 async function ingest(captures) {
   let stored = 0;
   let failed = 0;
+  let accepted = 0;
   for (let i = 0; i < captures.length; i += MAX_CAPTURES_PER_INGEST) {
+    if (i > 0) await sleep(INGEST_GAP_MS);
     const chunk = captures.slice(i, i + MAX_CAPTURES_PER_INGEST);
-    const result = await callTool("uplow_ingest_engagement", { captures: chunk });
-    const summary = result.summary || result;
-    stored += Number(summary.stored ?? summary.storedCount ?? chunk.length);
-    failed += Number(summary.failed ?? summary.failedCount ?? 0);
+    try {
+      const result = await callTool("uplow_ingest_engagement", { captures: chunk });
+      const summary = result.summary || result;
+      const chunkFailed = Number(summary.failed ?? summary.failedCount ?? 0);
+      stored += Number(summary.stored ?? summary.storedCount ?? chunk.length);
+      failed += chunkFailed;
+      if (chunkFailed) return { stored, failed, accepted };
+      accepted += chunk.length;
+    } catch (error) {
+      return { stored, failed, accepted, error: String(error?.message || error) };
+    }
   }
-  return { stored, failed };
+  return { stored, failed, accepted };
 }
 
 function addGroupKey(keys, value) {

@@ -177,12 +177,17 @@
     ) {
       const buttons = commentExpanders(element, includeReplies);
       if (!buttons.length && !scrollHost) {
-        if (rendered === 0 && expected > 0 && Date.now() < deadline) {
-          rendered = await waitForComments(element, 0, waitBudget(), count);
+        // A dialog with no expander yet is the shell, not an empty thread.
+        // One settle used to end the walk here, before the comment budget,
+        // which is how a permalink still painting its comments was read as none.
+        const left = deadline - Date.now();
+        if (rendered === 0 && expected > 0 && left > 0) {
+          rendered = await waitForComments(element, 0, Math.min(waitBudget(), left), count);
           if (rendered > 0) {
             stagnantRounds = 0;
             continue;
           }
+          if (deadline - Date.now() > 50) continue;
         }
         result.exhausted = true;
         break;

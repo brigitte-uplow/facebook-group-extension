@@ -219,16 +219,11 @@ function queueLine(status) {
       kind: "",
     };
   }
-  if (!outstanding && !held) {
-    return queue.failed
-      ? { text: `${queue.failed} thread(s) the worker could not read.`, kind: "error" }
-      : { text: "", kind: "" };
-  }
+  if (!outstanding && !held) return { text: "", kind: "" };
   const lanes = queue.lanes > 1 ? `, ${queue.lanes} at a time` : "";
-  const failed = queue.failed ? ` ${queue.failed} could not be read.` : "";
   return {
-    text: `${outstanding} post(s) queued for comments${lanes}; ${held} held back from upload until they land.${failed}`,
-    kind: queue.failed ? "error" : "",
+    text: `${outstanding} post(s) queued for comments${lanes}; ${held} waiting on a comment read, then uploaded.`,
+    kind: "",
   };
 }
 
@@ -261,7 +256,7 @@ function uploadLine(status) {
   const last = status.lastUpload;
   if (last?.error) {
     return {
-      text: `Upload failed (${last.error}) — the posts are still here and will be sent again when the page is reloaded.`,
+      text: `Upload failed (${last.error}) — the posts are still here and will be sent again.`,
       kind: "error",
     };
   }
@@ -272,6 +267,9 @@ function uploadLine(status) {
     };
   }
   if (last) return { text: `Stored ${last.stored} capture(s) in Uplow.`, kind: "ok" };
+  if ((status.reachedCutoff || status.walkFinished) && status.collected) {
+    return { text: "Sending the saved posts to Uplow…", kind: "" };
+  }
   if (!destination?.url || !destination?.key) {
     return {
       text: "No upload target — run `npm run config`, then reload the extension. Posts collected meanwhile are kept.",

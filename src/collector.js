@@ -1425,6 +1425,21 @@
           (state.walkFinished || state.reachedCutoff)))
     ) {
       finishRun().catch(() => {});
+      return;
+    }
+    // The walk is already over and Stop left the buffer here. Send it. This
+    // does not scroll the feed and does not open the comment queue again.
+    if (
+      !state.autoScrolling &&
+      !state.uploading &&
+      !state.uploadKickoff &&
+      !state.stopRequested &&
+      state.entries.size &&
+      (state.walkFinished || state.reachedCutoff)
+    ) {
+      state.uploadKickoff = true;
+      releaseUnreadHolds();
+      uploadAndMaybeRetry().catch(() => {});
     }
   }
 
@@ -1726,32 +1741,33 @@
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
-  const COMMENT_RETRY_WARNINGS = new Set([
-    "comments:worker_failed",
-    "comments:worker_timeout",
-    "comments:worker_lost",
-  ]);
-
   function jobForEntry(entry) {
     const pending = entry.pendingComments;
-    const capture = entry.capture || {};
-    const warnings = capture.warnings || [];
-    const retry = warnings.some((code) => COMMENT_RETRY_WARNINGS.has(code));
-    if (!pending?.postId && !retry) return null;
-    const postId = pending?.postId || capture.externalVideoId || null;
-    const url = pending?.url || capture.sourceUrl || null;
-    if (!postId || !url) return null;
-    return { postId, url };
+    if (!pending?.postId) return null;
+    const url = pending.url || entry.capture?.sourceUrl || null;
+    if (!url) return null;
+    return { postId: pending.postId, url };
+  }
+
+  // The worker already retried a failed read once (two attempts). A post still
+  // held after that drain is not queued again: the capture on hand is what gets
+  // stored, warning and all.
+  function releaseUnreadHolds() {
+    for (const entry of state.entries.values()) {
+      if (!entry.pendingComments) continue;
+      entry.pendingComments = null;
+      entry.capture = {
+        ...entry.capture,
+        phase: "full",
+        warnings: union(entry.capture.warnings, ["comments:worker_lost"]),
+      };
+    }
   }
 
   async function enqueueHeldJobs() {
     for (const entry of state.entries.values()) {
       const job = jobForEntry(entry);
       if (!job) continue;
-      if (!entry.pendingComments) {
-        entry.pendingComments = { postId: job.postId, url: job.url, at: Date.now() };
-        stampPhase(entry);
-      }
       state.queued.add(job.postId);
       await askBackground({
         type: "queueComments",
@@ -1805,25 +1821,31 @@
         if (state.stopRequested) return null;
         await askBackground({ type: "stopRun", groupKey: state.groupKey });
         state.queueStopped = true;
-        await waitForUpload();
-        const uploaded = await uploadCollection();
-        let held = 0;
-        for (const entry of state.entries.values()) if (holdingComments(entry)) held += 1;
-        if (!held && !uploaded?.error) {
-          state.drainingComments = false;
-          await setDrainFlag(false);
-        }
-        persistNow();
-        if (state.drainingComments && !state.stopRequested && !state.stopped) {
-          setTimeout(() => finishRun().catch(() => {}), 5000);
-        }
-        return uploaded;
+        releaseUnreadHolds();
+        return await uploadAndMaybeRetry();
       } finally {
         state.finishPromise = null;
       }
     })();
     return state.finishPromise;
   }
+
+  // A failed upload is retried on its own. It does not open the comment queue
+  // again; posts already read stay in the buffer and go with the next send.
+  async function uploadAndMaybeRetry() {
+    await waitForUpload();
+    const uploaded = await uploadCollection();
+    const retry = Boolean(uploaded?.error) && !state.stopRequested && !state.stopped;
+    state.drainingComments = false;
+    await setDrainFlag(false);
+    persistNow();
+    // A 403 here is Vercel cooling down a burst. Trying again in 5 seconds
+    // extends the block; two minutes lets it expire.
+    const wait = /HTTP 403/.test(uploaded?.error || "") ? 120000 : 5000;
+    if (retry) setTimeout(() => uploadAndMaybeRetry().catch(() => {}), wait);
+    return uploaded;
+  }
+
   async function stopCollecting() {
     state.stopRequested = true;
     state.queueStopped = true;
@@ -1962,11 +1984,17 @@
         return {
           stored: Number(answer.stored) || 0,
           failed: Number(answer.failed) || 0,
+          accepted: Number(answer.accepted) || captures.length,
           error: null,
         };
       }
-      if (attempt >= UPLOAD_RETRY_DELAYS_MS.length || state.stopped) {
-        return { stored: 0, failed: captures.length, error };
+      if (/HTTP 403/.test(error) || attempt >= UPLOAD_RETRY_DELAYS_MS.length || state.stopped) {
+        return {
+          stored: Number(answer?.stored) || 0,
+          failed: Number(answer?.failed) || captures.length,
+          accepted: Number(answer?.accepted) || 0,
+          error,
+        };
       }
       await new Promise((resolve) => setTimeout(resolve, UPLOAD_RETRY_DELAYS_MS[attempt]));
       if (state.stopped) return { stored: 0, failed: captures.length, error };
@@ -1989,9 +2017,10 @@
 
     try {
       const sent = await sendCaptures(captures);
-      // Only an answer that took all of them empties the buffer; a capture the
-      // backend refused has no row, and dropping it here would lose it.
-      if (!sent.error && !sent.failed) commitUpload(captures);
+      // Batches already accepted are dropped from the buffer, so a later 403
+      // retries only what is left. A capture the backend refused stays.
+      const accepted = Math.min(Number(sent.accepted) || 0, captures.length);
+      if (accepted && !sent.failed) commitUpload(captures.slice(0, accepted));
       return finished(sent);
     } catch (error) {
       return finished({
