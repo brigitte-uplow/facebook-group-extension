@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Facebook Group Post Scraper",
+  "version": "0.18.24",
+  "description": "Collects Facebook group posts as you scroll and exports them as engagement captures (caption, permalink, comments, metrics).",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://*.facebook.com/*",
+    "https://*.fb.com/*",
+    "http://127.0.0.1/*",
+    "https://uplow-mcp-git-features-upl-567-mcp-uplow-uplow.vercel.app/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.facebook.com/groups/*",
+        "https://*.fb.com/groups/*"
+      ],
+      "js": [
+        "src/boot.js"
+      ],
+      "run_at": "document_idle",
+      "exclude_matches": [
+        "https://*.facebook.com/groups/*/posts/*",
+        "https://*.facebook.com/groups/*/permalink/*",
+        "https://*.fb.com/groups/*/posts/*",
+        "https://*.fb.com/groups/*/permalink/*"
+      ]
+    }
+  ],
+  "action": {
+    "default_title": "Facebook Group Post Scraper",
+    "default_popup": "popup/popup.html"
+  }
+}

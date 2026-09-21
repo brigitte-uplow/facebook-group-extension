@@ -1,0 +1,4 @@
+node_modules/
+.env.local
+popup/config.js
+.DS_Store
