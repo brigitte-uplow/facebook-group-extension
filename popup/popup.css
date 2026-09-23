@@ -127,6 +127,45 @@ button.danger {
   color: var(--ok);
 }
 
+.timing {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.timing-title {
+  margin: 0;
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.timing-total {
+  margin: 6px 0 8px;
+}
+
+.timing-total strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.timing-rows {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 16px;
+  margin: 0;
+}
+
+.timing-rows dt {
+  color: var(--muted);
+}
+
+.timing-rows dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 .actions {
   display: flex;
   gap: 8px;

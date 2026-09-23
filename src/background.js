@@ -6,9 +6,6 @@ try {
 
 importScripts("/src/parse-tool-content.js");
 const MAX_CAPTURES_PER_INGEST = 25;
-// Back-to-back batches of a finished run are what Vercel's DDoS mitigation
-// counts. A gap keeps the same batches under that threshold.
-const INGEST_GAP_MS = 3000;
 
 // The scraper's halves, in the order they publish the globals each next one
 // reads. Matches popup.js CONTENT_SCRIPTS, minus collector.js: the worker tab
@@ -127,7 +124,6 @@ async function ingest(captures) {
   let failed = 0;
   let accepted = 0;
   for (let i = 0; i < captures.length; i += MAX_CAPTURES_PER_INGEST) {
-    if (i > 0) await sleep(INGEST_GAP_MS);
     const chunk = captures.slice(i, i + MAX_CAPTURES_PER_INGEST);
     try {
       const result = await callTool("uplow_ingest_engagement", { captures: chunk });
@@ -316,6 +312,31 @@ function waitForTabComplete(tabId, timeoutMs) {
         if (tab?.status === "complete") finish(resolve);
       })
       .catch((error) => finish(reject, error));
+  });
+}
+
+// A reload of a tab that is already "complete". Waiting on the current status
+// would resolve before the navigation starts, so this ignores that and only
+// accepts complete after a loading event from this reload.
+function reloadWorkerTab(tabId, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let loading = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      fn(value);
+    };
+    const timer = setTimeout(() => finish(reject, new Error("tab_load_timeout")), timeoutMs);
+    const onUpdated = (id, info) => {
+      if (id !== tabId || !info.status) return;
+      if (info.status === "loading") loading = true;
+      if (info.status === "complete" && loading) finish(resolve);
+    };
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.reload(tabId).catch((error) => finish(reject, error));
   });
 }
 
@@ -719,6 +740,19 @@ async function runJob(job, lane) {
   prefetchNext(jobs[0]?.url).catch(() => {});
   await withTimeout(waitForTabComplete(tabId, timeoutMs), timeoutMs, "tab_load_timeout");
   await sleep(paintMs);
+
+  let result = await scrapeLoadedPermalink(tabId, job, timeoutMs);
+  // The dialog painted and then sat on its skeleton. Reload this same
+  // permalink once; a fresh document is what gets Facebook to fetch the thread.
+  if (result?.error === "dialog_skeleton") {
+    await withTimeout(reloadWorkerTab(assertWorkerTab(tabId), timeoutMs), timeoutMs, "tab_load_timeout");
+    await sleep(paintMs);
+    result = await scrapeLoadedPermalink(tabId, job, timeoutMs);
+  }
+  return result;
+}
+
+async function scrapeLoadedPermalink(tabId, job, timeoutMs) {
   await chrome.scripting.executeScript({
     target: { tabId: assertWorkerTab(tabId) },
     files: SCRAPER_FILES,

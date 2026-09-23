@@ -47,16 +47,23 @@
     return anchor ? cleanUrl(anchor.href) : null;
   }
 
+  const MEDIA_HREF_PATTERN = /\/photo(?:\.php)?\/|[?&]fbid=|\/videos\/|\/reel\/|\/watch\//;
+
   async function revealPermalink(element, { timeoutMs = 600, pollMs = 100 } = {}) {
     const existing = getPermalink(element);
     if (existing) return existing;
 
-    // `a` without `[href]`: the anchor we are here for is the one still missing it.
-    const targets = headerNodes(
-      element,
-      commentRoots(element),
-      "a, [role='link'], span[tabindex], div[tabindex]"
-    ).filter((node) => node.isConnected);
+    // Only the timestamp. The header lookup used to cover the whole article, so
+    // this also hovered the photo link — Facebook opens that as the post, and
+    // the walk then stops on a page it was only trying to read.
+    const roots = commentRoots(element);
+    const timestampAnchors = globalThis.__fbGroupPostTimestamp?.timestampAnchors;
+    const targets = (timestampAnchors ? timestampAnchors(element, roots) : [])
+      .filter((node) => node.isConnected)
+      .filter((node) => {
+        const href = node.getAttribute?.("href") || "";
+        return !MEDIA_HREF_PATTERN.test(href) || anchorLooksTimestamped(node);
+      });
     if (!targets.length) return null;
 
     for (const node of targets) dispatchPointerEvents(node, POINT_AT_EVENTS);

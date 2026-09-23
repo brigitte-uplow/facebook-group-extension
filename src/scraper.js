@@ -46,6 +46,7 @@
     findPostDialog,
     blockedNavigations,
     holdNavigationGuard,
+    permitNavigation,
   } = globalThis.__fbGroupDom;
   const {
     findAuthorLink,
@@ -321,6 +322,7 @@
     // and the switch that holds it open for the length of a run.
     blockedNavigations,
     holdNavigationGuard,
+    permitNavigation,
     onGroupFeed,
     getCommentCount,
     renderedCommentCount,

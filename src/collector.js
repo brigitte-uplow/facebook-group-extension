@@ -2,7 +2,7 @@
   const S = globalThis.__fbGroupScraper;
   if (!S) return;
 
-  const VERSION = "0.18.25";
+  const VERSION = "0.18.26";
   const HARVEST_DEBOUNCE_MS = 400;
   const SCROLL_THROTTLE_MS = 600;
   const RENDER_DEBOUNCE_MS = 250;
@@ -100,6 +100,14 @@
           harvestArmed: false,
           uploading: false,
           lastUpload: null,
+          timing: {
+            collectStartedAt: null,
+            collectEndedAt: null,
+            drainStartedAt: null,
+            drainEndedAt: null,
+            storeStartedAt: null,
+            storeEndedAt: null,
+          },
           progress: null,
           lastHarvestAt: null,
           harvestChain: null,
@@ -186,6 +194,16 @@
   if (!("collected" in state)) state.collected = state.entries.size;
   if (!("uploading" in state)) state.uploading = false;
   if (!("lastUpload" in state)) state.lastUpload = null;
+  if (!state.timing) {
+    state.timing = {
+      collectStartedAt: null,
+      collectEndedAt: null,
+      drainStartedAt: null,
+      drainEndedAt: null,
+      storeStartedAt: null,
+      storeEndedAt: null,
+    };
+  }
   if (!("feedOrder" in state.options)) state.options.feedOrder = "new";
   delete state.finishedThreads;
   delete state.finishedElements;
@@ -198,6 +216,56 @@
   delete state.unchanged;
   state.stopped = false;
   state.uploading = false;
+
+  function emptyTiming() {
+    return {
+      collectStartedAt: null,
+      collectEndedAt: null,
+      drainStartedAt: null,
+      drainEndedAt: null,
+      storeStartedAt: null,
+      storeEndedAt: null,
+    };
+  }
+  function stampMs(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  function restoreTiming(raw) {
+    const timing = emptyTiming();
+    if (!raw || typeof raw !== "object") return timing;
+    for (const key of Object.keys(timing)) timing[key] = stampMs(raw[key]);
+    return timing;
+  }
+  // Each stamp is written once, so a remount mid-phase keeps the original
+  // start. Storing is the exception: a retry moves the end later, and the
+  // wait between attempts counts as part of that phase.
+  function markCollectStart(reset) {
+    if (reset || !state.timing?.collectStartedAt || state.timing.collectEndedAt) {
+      state.timing = emptyTiming();
+    }
+    if (!state.timing.collectStartedAt) state.timing.collectStartedAt = Date.now();
+  }
+  function markCollectEnd() {
+    if (!state.timing) state.timing = emptyTiming();
+    if (!state.timing.collectStartedAt) state.timing.collectStartedAt = Date.now();
+    if (!state.timing.collectEndedAt) state.timing.collectEndedAt = Date.now();
+  }
+  function markDrainStart() {
+    markCollectEnd();
+    if (!state.timing.drainStartedAt) state.timing.drainStartedAt = Date.now();
+  }
+  function markDrainEnd() {
+    if (!state.timing.drainStartedAt) state.timing.drainStartedAt = Date.now();
+    if (!state.timing.drainEndedAt) state.timing.drainEndedAt = Date.now();
+  }
+  function markStoreStart() {
+    markDrainEnd();
+    if (!state.timing.storeStartedAt) state.timing.storeStartedAt = Date.now();
+  }
+  function markStoreEnd() {
+    if (!state.timing.storeStartedAt) state.timing.storeStartedAt = Date.now();
+    state.timing.storeEndedAt = Date.now();
+  }
 
   const groupKeyFromUrl = () => location.pathname.match(/\/groups\/([^/]+)/)?.[1] || null;
   const storageKey = (groupKey) => `collection:v${STATE_VERSION}:${groupKey}`;
@@ -576,6 +644,7 @@
           lastDiscoveredAt: state.lastDiscoveredAt,
           drainingComments: state.drainingComments,
           queueStopped: state.queueStopped,
+          timing: state.timing,
         },
       })
     )?.catch?.(stop);
@@ -621,6 +690,7 @@
       state.hydrated = false;
       state.drainingComments = false;
       state.finishPromise = null;
+      state.timing = emptyTiming();
     }
     if (state.hydrated || !hasStorage()) {
       if (!state.autoScrolling && !state.cutoffResolved) await resolveCutoff();
@@ -649,6 +719,7 @@
     if (typeof stored?.walkFinished === "boolean") state.walkFinished = stored.walkFinished;
     state.drainingComments = Boolean(stored?.drainingComments);
     if (typeof stored?.queueStopped === "boolean") state.queueStopped = stored.queueStopped;
+    if (stored?.timing) state.timing = restoreTiming(stored.timing);
     for (const entry of state.entries.values()) {
       // A buffer written by a build that did not know about the two phases has
       // captures claiming to be full while still waiting on the worker.
@@ -1596,6 +1667,8 @@
       maxSeconds = targetPosts === null ? null : budgetSeconds(targetPosts),
       fromTop = true,
     } = options;
+    markCollectStart(fromTop);
+    persistNow();
     await resolveCutoff();
     if (fromTop) {
       state.reachedCutoff = false;
@@ -1635,6 +1708,54 @@
     let leftFeed = false;
     let restores = 0;
     let result = null;
+    // A photo or timestamp opening the post. Same-path query overlays
+    // (multi_permalinks, fbid) stay on the group URL, so onGroupFeed() alone
+    // does not see them.
+    const overlayOpen = () =>
+      Boolean(S.findPostDialog()) ||
+      /multi_permalinks=|[?&](?:comment_id|fbid|story_fbid)=/.test(location.search || "");
+    async function recoverFeed() {
+      const { sleep } = S.motion;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        if (S.onGroupFeed() && !overlayOpen()) return true;
+        const dialog = S.findPostDialog();
+        const close = dialog?.querySelector?.(
+          '[aria-label="Close" i], [aria-label="Loka" i]'
+        );
+        if (close) close.click();
+        else {
+          document.body.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              key: "Escape",
+              code: "Escape",
+              keyCode: 27,
+              which: 27,
+              bubbles: true,
+              cancelable: true,
+            })
+          );
+        }
+        await sleep(S.randInt(280, 500));
+        if (S.onGroupFeed() && !overlayOpen()) return true;
+        if (S.onGroupFeed() && !S.findPostDialog() && overlayOpen()) {
+          const groupUrl = S.getGroup()?.url || null;
+          if (groupUrl) {
+            S.permitNavigation(() => history.replaceState(history.state, "", groupUrl));
+            await sleep(S.randInt(200, 400));
+          }
+          if (!overlayOpen()) return true;
+        }
+        if (!S.onGroupFeed()) {
+          const groupUrl = S.getGroup()?.url || null;
+          S.permitNavigation(() => {
+            if (history.length > 1) history.back();
+            else if (groupUrl) location.assign(groupUrl);
+          });
+          await sleep(S.randInt(700, 1200));
+        }
+      }
+      return S.onGroupFeed() && !overlayOpen();
+    }
 
     try {
       if (fromTop && (window.scrollY || 0) > 0) {
@@ -1660,21 +1781,21 @@
         now() < deadline
       ) {
         await waitWhile(() => document.visibilityState === "hidden", deadline, MAX_PAGE_UNAVAILABLE_MS);
-        // A dialog that came with a route change is not one to wait behind:
-        // the page it was covering is gone, so waiting it out spends the whole
-        // unavailable budget on a feed that is never coming back.
-        await waitWhile(
-          () => Boolean(S.findPostDialog()) && S.onGroupFeed(),
-          deadline,
-          MAX_PAGE_UNAVAILABLE_MS
-        );
         if (state.stopped || now() >= deadline) break;
-        if (!S.onGroupFeed()) {
-          state.offFeedSince = state.offFeedSince ?? now();
-          leftFeed = true;
+        // Opening a post is not the cutoff. Close it and keep walking; storing
+        // here is what used to file a half-read group as a finished run.
+        if (!S.onGroupFeed() || overlayOpen()) {
+          const back = await recoverFeed();
+          if (back) continue;
+          if (!S.onGroupFeed()) {
+            state.offFeedSince = state.offFeedSince ?? now();
+            leftFeed = true;
+          } else {
+            unavailable = true;
+          }
           break;
         }
-        if (document.visibilityState === "hidden" || S.findPostDialog()) {
+        if (document.visibilityState === "hidden") {
           unavailable = true;
           break;
         }
@@ -1750,8 +1871,12 @@
     // Phase two starts here, on its own. Rebuilding held jobs first is what
     // used to need the Collect comments click after a long walk killed the
     // worker's in-memory queue.
-    if (result && !state.stopRequested && !state.stopped) {
+    // Left the feed, or a post stayed open: that is not a finished sweep, and
+    // the posts read so far stay in the buffer until the walk actually reaches
+    // the cutoff or the bottom of the feed.
+    if (result && !state.stopRequested && !state.stopped && !leftFeed && !unavailable) {
       state.walkFinished = true;
+      markCollectEnd();
       persistNow();
       finishRun();
     }
@@ -1831,6 +1956,7 @@
     if (state.finishPromise) return state.finishPromise;
     state.walkFinished = true;
     state.drainingComments = true;
+    markDrainStart();
     persistNow();
     state.finishPromise = (async () => {
       try {
@@ -1855,6 +1981,14 @@
         await askBackground({ type: "stopRun", groupKey: state.groupKey });
         state.queueStopped = true;
         releaseUnreadHolds();
+        // Parked jobs are not a live queue once every post has been released.
+        // Leaving them counted is what the popup showed as still queued
+        // during the send.
+        if (!hasHeldPosts()) {
+          await askBackground({ type: "clearQueue", groupKey: state.groupKey });
+          noteQueueCleared();
+        }
+        markDrainEnd();
         return await uploadAndMaybeRetry();
       } finally {
         state.finishPromise = null;
@@ -1905,6 +2039,12 @@
     for (const view of rendered.values()) if (isEligible(view)) eligibleNow += 1;
     let held = 0;
     for (const entry of state.entries.values()) if (holdingComments(entry)) held += 1;
+    // The worker can still list jobs after each post has been released. That
+    // count is what kept the popup on "8 queued" while the upload was already
+    // sending. With nothing held, there is no comment queue left.
+    const queue = held
+      ? { ...state.queue, held }
+      : { ...state.queue, pending: 0, inFlight: 0, held: 0 };
     return {
       version: VERSION,
       scraperVersion: S.version,
@@ -1923,7 +2063,7 @@
       uploadedThisRun: state.uploaded.size,
       // `held` is posts read but not yet storable: their thread is still coming,
       // and nothing goes to the database until it has.
-      queue: { ...state.queue, held },
+      queue,
       // Parked rather than running: a Stop left these for the next run.
       queueStopped: state.queueStopped,
       renderedNow: rendered.size,
@@ -1946,6 +2086,7 @@
       drainingComments: state.drainingComments,
       uploading: state.uploading,
       lastUpload: state.lastUpload,
+      timing: state.timing ? { ...state.timing } : null,
       progress: state.progress,
       lastHarvestAt: state.lastHarvestAt,
       observing: Boolean(state.observer),
@@ -1977,6 +2118,7 @@
     state.stopRequested = false;
     state.drainingComments = false;
     state.finishPromise = null;
+    state.timing = emptyTiming();
     await setDrainFlag(false);
     state.feedOrderSettled = false;
     state.feedOrderTries = 0;
@@ -2039,11 +2181,18 @@
     // read now rather than taken from whenever the last pass happened to ask.
     await refreshQueueStatus();
     const captures = toCaptures();
-    if (!captures.length) return { stored: 0, failed: 0, error: null };
+    if (!captures.length) {
+      markStoreStart();
+      markStoreEnd();
+      state.lastUpload = { at: new Date().toISOString(), stored: 0, failed: 0, error: null };
+      return state.lastUpload;
+    }
 
     state.uploading = true;
+    markStoreStart();
     const finished = (outcome) => {
       state.uploading = false;
+      markStoreEnd();
       state.lastUpload = { at: new Date().toISOString(), ...outcome };
       return state.lastUpload;
     };

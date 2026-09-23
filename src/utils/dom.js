@@ -135,8 +135,22 @@
   let releaseGuard = null;
   let guardHeld = false;
   let lastTrustedAt = 0;
+  // Our own way back to the feed. history.back() is not a user click, and the
+  // guard would otherwise cancel it — which is how a post that opened mid-walk
+  // could never be closed.
+  let permittedNav = 0;
 
   const recentlyAsked = () => Date.now() - lastTrustedAt < TRUSTED_INTENT_MS;
+  function permitNavigation(fn) {
+    permittedNav += 1;
+    try {
+      return fn();
+    } finally {
+      setTimeout(() => {
+        permittedNav = Math.max(0, permittedNav - 1);
+      }, 1500);
+    }
+  }
 
   function noteTrustedIntent(event) {
     if (event.isTrusted) lastTrustedAt = Date.now();
@@ -186,7 +200,7 @@
     const replaceState = history.replaceState;
     const routeTrap = (kind, original) =>
       function guarded(state, title, url) {
-        if (leavesPage(url) && !recentlyAsked()) {
+        if (leavesPage(url) && !recentlyAsked() && permittedNav === 0) {
           noteBlocked(kind, String(url));
           if (trapRoutes()) return undefined;
         }
@@ -207,7 +221,7 @@
     const replace = proto.replace;
     const loadTrap = (kind, original) =>
       function guarded(url) {
-        if (leavesPage(url) && !recentlyAsked()) {
+        if (leavesPage(url) && !recentlyAsked() && permittedNav === 0) {
           noteBlocked(kind, String(url));
           if (trapRoutes()) return undefined;
         }
@@ -235,7 +249,7 @@
     let releaseNav = () => {};
     if (typeof nav?.addEventListener === "function") {
       const onNavigate = (event) => {
-        if (event.userInitiated || recentlyAsked()) return;
+        if (permittedNav > 0 || event.userInitiated || recentlyAsked()) return;
         const url = event.destination?.url;
         if (!leavesPage(url)) return;
         noteBlocked("navigate", String(url));
@@ -384,6 +398,7 @@
     navigatesAway,
     clickWithoutNavigating,
     holdNavigationGuard,
+    permitNavigation,
     blockedNavigations,
     attemptsNavigation,
     findPostDialog,

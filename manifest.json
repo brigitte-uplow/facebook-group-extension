@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Facebook Group Post Scraper",
-  "version": "0.18.25",
+  "version": "0.18.26",
   "description": "Collects Facebook group posts as you scroll and exports them as engagement captures (caption, permalink, comments, metrics).",
   "permissions": [
     "activeTab",

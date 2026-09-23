@@ -159,6 +159,9 @@
       if (!control || found.includes(control)) return;
       if (inNestedArticle(control, element)) return;
       if (!allowNavigate && (navigatesAway(control) || attemptsNavigation(control))) return;
+      // A "See more" nested in the photo or the story link does not expand the
+      // caption. The click bubbles to that link and Facebook opens the post.
+      if (!allowNavigate && control.parentElement?.closest?.("a[href], [role='link']")) return;
       found.push(control);
     };
 

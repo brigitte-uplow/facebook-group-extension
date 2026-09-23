@@ -45,6 +45,19 @@
          Reported here; there is nothing to press. -->
     <p id="uploadState" class="status"></p>
 
+    <section id="timing" class="timing" hidden>
+      <p class="timing-title">✓ Scrape complete</p>
+      <p class="timing-total">Total time <strong id="timingTotal">0s</strong></p>
+      <dl class="timing-rows">
+        <dt>Collecting</dt>
+        <dd id="timingCollect">0s</dd>
+        <dt>Draining</dt>
+        <dd id="timingDrain">0s</dd>
+        <dt>Storing</dt>
+        <dd id="timingStore">0s</dd>
+      </dl>
+    </section>
+
     <!-- What sets a run going. Loading a group page no longer starts one on its
          own: several groups are worked through in one browser and only the tab
          being looked at can scroll, so the tabs are opened first and started

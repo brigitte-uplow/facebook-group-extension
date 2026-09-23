@@ -6,6 +6,11 @@ const els = Object.fromEntries(
     "order",
     "mode",
     "uploadState",
+    "timing",
+    "timingTotal",
+    "timingCollect",
+    "timingDrain",
+    "timingStore",
     "queue",
     "route",
     "run",
@@ -187,7 +192,7 @@ function modeLine(status) {
     status.scrapeMode === "incremental"
       ? "the last 48 hours"
       : until;
-  if (status.drainingComments) {
+  if (status.drainingComments && (status.queue?.held || 0) > 0) {
     return { text: `Collecting comments for posts already read back to ${window}.`, kind: "ok" };
   }
   if (status.reachedCutoff || status.walkFinished) {
@@ -212,6 +217,11 @@ function queueLine(status) {
   const queue = status.queue || {};
   const outstanding = (queue.pending || 0) + (queue.inFlight || 0);
   const held = queue.held || 0;
+
+  // Jobs can stay on the worker after every post has already been released.
+  // Nothing is waiting on a comment read, and those captures are already in
+  // the upload, so the leftover count is not a queue.
+  if (!held) return { text: "", kind: "" };
 
   if (status.queueStopped && !status.drainingComments && (outstanding || held)) {
     return {
@@ -268,9 +278,8 @@ function uploadLine(status) {
   }
   if (last) return { text: `Stored ${last.stored} capture(s) in Uplow.`, kind: "ok" };
   if ((status.reachedCutoff || status.walkFinished) && status.collected) {
-    const outstanding = (status.queue?.pending || 0) + (status.queue?.inFlight || 0);
     const held = status.queue?.held || 0;
-    if (status.drainingComments || outstanding || held) {
+    if (held) {
       return { text: "Posts upload to Uplow when the comment queue finishes.", kind: "" };
     }
     return { text: "Sending the saved posts to Uplow…", kind: "" };
@@ -284,10 +293,48 @@ function uploadLine(status) {
   return { text: "Posts are uploaded automatically when the run finishes.", kind: "" };
 }
 
+function formatDuration(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function phaseMs(start, end) {
+  if (typeof start !== "number" || typeof end !== "number" || end < start) return null;
+  return end - start;
+}
+
+// Shown once collecting, comment draining, and the Uplow upload have all
+// finished. Total is those three added together, so the lines sum to it.
+function renderTiming(status) {
+  const timing = status?.timing;
+  const collect = phaseMs(timing?.collectStartedAt, timing?.collectEndedAt);
+  const drain = phaseMs(timing?.drainStartedAt, timing?.drainEndedAt);
+  const store = phaseMs(timing?.storeStartedAt, timing?.storeEndedAt);
+  const busy = Boolean(status?.autoScrolling || status?.drainingComments || status?.uploading);
+  const failed = Boolean(status?.lastUpload?.error);
+  const done =
+    !busy &&
+    !failed &&
+    collect !== null &&
+    drain !== null &&
+    store !== null &&
+    Boolean(status?.walkFinished || status?.reachedCutoff);
+  els.timing.hidden = !done;
+  if (!done) return;
+  els.timingTotal.textContent = formatDuration(collect + drain + store);
+  els.timingCollect.textContent = formatDuration(collect);
+  els.timingDrain.textContent = formatDuration(drain);
+  els.timingStore.textContent = formatDuration(store);
+}
+
 // What the one button on this window is for, which depends entirely on what the
-// page is already doing. A run reaching the cutoff is the only finished sweep
-// there is, and resuming past it would do nothing — the walk's own loop stops
-// on it — so that state names Clear rather than pretending otherwise.
+// page is already doing. A finished sweep stays stored after a reload, and
+// Start begins a new one from the top rather than resuming past the cutoff.
 function runButton(status) {
   if (status.stopped) return { label: "Reload the page to collect", disabled: true };
   // Starting here would walk a page that is not the feed, and nothing in the
@@ -296,7 +343,9 @@ function runButton(status) {
     return { label: "Go back to the group's feed", disabled: true };
   }
   if (status.autoScrolling) return { label: "Collecting…", disabled: true };
-  if (status.drainingComments) return { label: "Collecting comments…", disabled: true };
+  if (status.drainingComments && (status.queue?.held || 0) > 0) {
+    return { label: "Collecting comments…", disabled: true };
+  }
   if ((status.queue?.held || 0) > 0) {
     // Walk already finished — comments are starting without a click.
     if (!status.queueStopped && (status.walkFinished || status.reachedCutoff)) {
@@ -304,7 +353,10 @@ function runButton(status) {
     }
     return { label: "Collect comments", disabled: false };
   }
-  if (status.reachedCutoff) return { label: "Finished — Clear to read again", disabled: true };
+  // A finished sweep is stored on the group, so reloading the page brings it
+  // back. Start is a new walk from the top; Resume is only for a walk that
+  // was stopped partway.
+  if (status.reachedCutoff || status.walkFinished) return { label: "Start collecting", disabled: false };
   if (status.walked) return { label: "Resume collecting", disabled: false };
   return { label: "Start collecting", disabled: false };
 }
@@ -327,12 +379,13 @@ function applyStatus(status) {
   els.route.className = `status ${route.kind}`.trim();
   els.stop.hidden = !(
     status.autoScrolling ||
-    status.drainingComments ||
+    (status.drainingComments && (status.queue?.held || 0) > 0) ||
     (commentDrainAsked && (status.queue?.held || 0) > 0)
   );
   const upload = uploadLine(status);
   els.uploadState.textContent = upload.text;
   els.uploadState.className = `status ${upload.kind}`.trim();
+  renderTiming(status);
   const run = runButton(status);
   els.run.textContent = run.label;
   els.run.disabled = run.disabled;
@@ -348,7 +401,7 @@ async function refreshStatus() {
     // that is not happening and cannot start.
     if (status?.stopped) {
       setStatus(status.stoppedReason, "error");
-    } else if (status?.drainingComments) {
+    } else if (status?.drainingComments && (status?.queue?.held || 0) > 0) {
       setStatus("Collecting comments in the worker window. The feed may reload; that is expected.");
     } else if (
       !status?.autoScrolling &&
@@ -369,6 +422,8 @@ async function refreshStatus() {
       // Said here too: a run that walked off the feed leaves the line below
       // reading "Auto-scrolling…" forever otherwise.
       setStatus("Paused — this tab is on a post's page, not the group's feed.", "error");
+    } else if (status?.reachedCutoff || status?.walkFinished) {
+      setStatus("This run is finished. Press Start to read the group again.");
     } else if (status?.autoScrolling) {
       // No denominator unless something asked for a count: the run is walking
       // toward a date, and how many posts lie above it is not known in advance.
@@ -438,7 +493,11 @@ els.run.addEventListener("click", async () => {
       await refreshStatus();
       return;
     }
-    const fromTop = !status?.walked;
+    // A finished run is stored, so `walked` stays set after a reload. Starting
+    // again has to be a new sweep from the top; otherwise the cutoff is still
+    // set and the walk stops immediately.
+    const finished = Boolean(status?.reachedCutoff || status?.walkFinished);
+    const fromTop = finished || !status?.walked;
     await startInPage(fromTop);
     setStatus("Collecting. The feed scrolls itself from here.");
   } catch (error) {

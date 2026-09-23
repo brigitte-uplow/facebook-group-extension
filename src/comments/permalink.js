@@ -74,6 +74,23 @@
     return renderedCommentCount(host) > 0 ? host : null;
   }
 
+  // Grey bars Facebook paints while a dialog is still fetching. A loaded post
+  // can still have one on a photo, so this only matters while the thread itself
+  // has not appeared.
+  const SKELETON_SELECTOR = [
+    '[data-visualcompletion="loading-state"]',
+    '[role="progressbar"]',
+    '[aria-busy="true"]',
+    '[aria-label="Loading" i]',
+    '[aria-label="Loading..." i]',
+  ].join(", ");
+
+  function commentSkeleton(scope) {
+    const host = scope || threadScope();
+    if (!host) return false;
+    return Boolean(host.querySelector(SKELETON_SELECTOR));
+  }
+
   function readComments(scope, scrapedAt) {
     const host = scope || threadScope();
     if (!host) return [];
@@ -132,6 +149,15 @@
     for (let attempt = 0; attempt < 2; attempt += 1) {
       scope = threadScope() || scope;
       const empty = tally > 0 && !commentsReady(scope);
+      // The first pass is the chance to paint. Still on the skeleton after
+      // that means the permalink stalled; another menu click will not fetch
+      // it. The worker reloads this URL instead of spending the thread budget
+      // on grey bars.
+      if (attempt > 0 && empty && commentSkeleton(scope)) {
+        result.reason = "dialog_skeleton";
+        result.error = "dialog_skeleton";
+        return result;
+      }
       sorted = await setCommentOrder(scope, order, { force: empty });
       result.order = sorted.order;
       result.verified = sorted.verified;
@@ -141,6 +167,13 @@
         scope = threadScope() || scope;
       }
       if (commentsReady(scope) || tally === 0) break;
+    }
+
+    scope = threadScope() || scope;
+    if (tally > 0 && !commentsReady(scope) && commentSkeleton(scope)) {
+      result.reason = "dialog_skeleton";
+      result.error = "dialog_skeleton";
+      return result;
     }
 
     const maxSeconds = Math.max(
