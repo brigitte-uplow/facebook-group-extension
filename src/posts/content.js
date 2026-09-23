@@ -13,15 +13,21 @@
     unique,
     cleanUrl,
   } = globalThis.__fbGroupText;
-  const { sleep } = globalThis.__fbGroupMotion;
   const {
     POST_URL_PATTERN,
     PROFILE_URL_PATTERN,
     SEE_MORE_PATTERN,
   } = globalThis.__fbGroupPatterns;
   const { handleFromProfileUrl } = globalThis.__fbGroupLinks;
-  const { textBlocks, findButtons, navigatesAway, clickWithoutNavigating } =
-    globalThis.__fbGroupDom;
+  const {
+    textBlocks,
+    findButtons,
+    trimLabel,
+    clickableFor,
+    navigatesAway,
+    attemptsNavigation,
+    clickWithoutNavigating,
+  } = globalThis.__fbGroupDom;
 
   /* ------------------------------------------------------------------ author */
 
@@ -118,18 +124,138 @@
   // handler still runs and opens the post. So the ones that sit inside a link
   // are left alone and their captions stay truncated — a shortened caption is a
   // smaller loss than a walk that ends up inside the post it was reading.
-  const expandable = (element) =>
-    findButtons(element, SEE_MORE_PATTERN).filter((button) => !navigatesAway(button));
+  const MAX_SEE_MORE_ROUNDS = 4;
+  const CAPTION_READY_MS = 800;
+  const CAPTION_STABLE_MS = 180;
+  const CAPTION_EXPAND_MS = 1200;
 
-  async function expandText(element) {
-    for (const button of expandable(element)) {
-      if (!button.isConnected) continue;
-      clickWithoutNavigating(button);
-      await sleep(150);
+  const inNestedArticle = (node, root) => {
+    const article = node.closest?.('div[role="article"]');
+    return Boolean(article && article !== root && root.contains(article));
+  };
+
+  const isSeeMoreLabel = (value) => SEE_MORE_PATTERN.test(trimLabel(value || ""));
+
+  function captionSignature(element) {
+    const explicit = element.querySelector(
+      '[data-ad-preview="message"], [data-ad-comet-preview="message"], [data-testid="post_message"]'
+    );
+    if (explicit) return readText(explicit);
+    const blocks = [];
+    for (const block of textBlocks(element)) {
+      if (inNestedArticle(block, element)) continue;
+      if (block.closest("h2, h3, h4, [role='toolbar']")) continue;
+      const text = readText(block);
+      if (!text || isChromeLine(text)) continue;
+      blocks.push(text);
     }
+    return blocks.join("\n");
   }
 
-  const hasTruncatedText = (element) => expandable(element).length > 0;
+  function findCaptionSeeMore(element, options = {}) {
+    const allowNavigate = options.allowNavigate === true;
+    const found = [];
+    const consider = (control) => {
+      if (!control || found.includes(control)) return;
+      if (inNestedArticle(control, element)) return;
+      if (!allowNavigate && (navigatesAway(control) || attemptsNavigation(control))) return;
+      found.push(control);
+    };
+
+    for (const button of findButtons(element, SEE_MORE_PATTERN)) consider(button);
+
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (!isSeeMoreLabel(node.nodeValue)) continue;
+      const host = node.parentElement;
+      if (!host || inNestedArticle(host, element)) continue;
+      consider(clickableFor(host));
+    }
+    return found;
+  }
+
+  function waitForCaptionReady(element, timeoutMs) {
+    return new Promise((resolve) => {
+      if (findCaptionSeeMore(element).length) return resolve("see-more");
+      let last = captionSignature(element);
+      let lastChange = Date.now();
+      let dirty = false;
+      let observer = null;
+      let pollTimer = null;
+      const started = Date.now();
+      const finish = (reason) => {
+        clearTimeout(pollTimer);
+        observer?.disconnect();
+        resolve(reason);
+      };
+      observer = new MutationObserver(() => {
+        dirty = true;
+      });
+      observer.observe(element, { childList: true, subtree: true, characterData: true });
+      const poll = () => {
+        if (findCaptionSeeMore(element).length) return finish("see-more");
+        if (dirty) {
+          dirty = false;
+          const next = captionSignature(element);
+          if (next !== last) {
+            last = next;
+            lastChange = Date.now();
+          }
+        }
+        if (Date.now() - lastChange >= CAPTION_STABLE_MS) return finish("stable");
+        if (Date.now() - started >= timeoutMs) return finish("timeout");
+        pollTimer = setTimeout(poll, 50);
+      };
+      poll();
+    });
+  }
+
+  function waitForCaptionExpand(element, before, timeoutMs) {
+    return new Promise((resolve) => {
+      const grown = () => captionSignature(element).length > before.length;
+      if (grown()) return resolve(true);
+      let observer = null;
+      let settleTimer = null;
+      const finish = (value) => {
+        clearTimeout(timer);
+        clearTimeout(settleTimer);
+        observer?.disconnect();
+        resolve(value);
+      };
+      const timer = setTimeout(() => finish(grown()), timeoutMs);
+      observer = new MutationObserver(() => {
+        if (grown()) return finish(true);
+        // See more is gone but the replacement text can land a frame later.
+        if (!findCaptionSeeMore(element).length && !settleTimer) {
+          settleTimer = setTimeout(() => finish(grown()), 200);
+        }
+      });
+      observer.observe(element, { childList: true, subtree: true, characterData: true });
+    });
+  }
+
+  async function expandText(element) {
+    if (!element?.isConnected) return 0;
+    // Fast bursts paint the card before "See more". Wait until that control
+    // appears, or until the caption stops changing, before reading it.
+    await waitForCaptionReady(element, CAPTION_READY_MS);
+    let clicks = 0;
+    for (let round = 0; round < MAX_SEE_MORE_ROUNDS; round += 1) {
+      const buttons = findCaptionSeeMore(element);
+      if (!buttons.length) break;
+      const before = captionSignature(element);
+      for (const button of buttons) {
+        if (!button.isConnected) continue;
+        clickWithoutNavigating(button);
+        clicks += 1;
+      }
+      await waitForCaptionExpand(element, before, CAPTION_EXPAND_MS);
+    }
+    return clicks;
+  }
+
+  const hasTruncatedText = (element) =>
+    findCaptionSeeMore(element, { allowNavigate: true }).length > 0;
 
   globalThis.__fbGroupPostContent = Object.freeze({
     findAuthorLink,

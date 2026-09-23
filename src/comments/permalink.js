@@ -9,8 +9,6 @@
   const { isCommentArticle } = globalThis.__fbGroupPostDetect;
   const { getComments } = globalThis.__fbGroupCommentExtract;
   const { setCommentOrder } = globalThis.__fbGroupCommentOrder;
-  const { motion, randInt } = globalThis.__fbGroupMotion;
-  const { sleep } = motion;
   const {
     expandComments,
     expandCommentText,
@@ -32,7 +30,7 @@
     );
   }
 
-  const WORKER_MIN_THREAD_SECONDS = 30;
+  const WORKER_MIN_THREAD_SECONDS = 12;
 
   function waitUntil(check, timeoutMs) {
     return new Promise((resolve) => {
@@ -129,7 +127,9 @@
     // walking. Re-select even when it already says Newest if still empty —
     // that refetch is what loads the messages.
     let sorted = { order: null, verified: false, reason: "control_not_found" };
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    // One switch to Newest, then a single refetch if the thread is still a
+    // shell. Repeating the menu five times was most of the wait between posts.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       scope = threadScope() || scope;
       const empty = tally > 0 && !commentsReady(scope);
       sorted = await setCommentOrder(scope, order, { force: empty });
@@ -137,11 +137,10 @@
       result.verified = sorted.verified;
       result.orderReason = sorted.reason;
       if (empty) {
-        await waitUntil(() => commentsReady(threadScope()), 4000);
+        await waitUntil(() => commentsReady(threadScope()), attempt === 0 ? 2500 : 4000);
         scope = threadScope() || scope;
       }
-      if (commentsReady(scope)) break;
-      await sleep(randInt(400, 900));
+      if (commentsReady(scope) || tally === 0) break;
     }
 
     const maxSeconds = Math.max(

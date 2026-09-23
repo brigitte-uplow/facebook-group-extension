@@ -53,9 +53,9 @@
 
   function threadSettleMs(expected, target) {
     const pages = threadPages(expected, target);
-    if (pages <= 1) return 700;
-    if (pages <= 3) return 1400;
-    return 2500;
+    if (pages <= 1) return 450;
+    if (pages <= 3) return 800;
+    return 1400;
   }
 
   async function captureThread(element, options = {}) {

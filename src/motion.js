@@ -63,10 +63,11 @@
   const MAX_LAG_TICKS = 24;
   function tickCount(total) {
     const drawn = randInt(MIN_TICKS, MAX_TICKS);
-    const needed = Math.max(
-      Math.round(drawn * Math.min(lagFactor, 1.5)),
-      Math.ceil(Math.abs(Math.round(total)) / MAX_TICK_PX)
-    );
+    // Distance sets the tick count. Lag used to multiply it, so a long run —
+    // whose caption work makes timers late — turned later flicks into more,
+    // smaller steps. A flick stays the same length at the end of a walk as at
+    // the start.
+    const needed = Math.ceil(Math.abs(Math.round(total)) / MAX_TICK_PX);
     return Math.min(MAX_LAG_TICKS, Math.max(drawn, needed));
   }
 
@@ -81,7 +82,7 @@
   }
   const tickMs = (options, ticks) =>
     options.durationMs
-      ? Math.max(1, Math.round(((options.durationMs * lagFactor) / ticks) * randFloat(0.8, 1.2)))
+      ? Math.max(1, Math.round((options.durationMs / ticks) * randFloat(0.8, 1.2)))
       : randInt(options.minTickMs ?? MIN_TICK_MS, options.maxTickMs ?? MAX_TICK_MS);
   async function glideBy(distance, options = {}) {
     const total = Math.round(distance);

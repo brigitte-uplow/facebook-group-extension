@@ -29,7 +29,7 @@
   // Two silent rounds, not three. A round that answers is seen the moment it
   // does, so a round that does not is real evidence rather than a slow poll.
   const STAGNANT_ROUNDS_TO_STOP = 2;
-  const MIN_SETTLE_MS = 600;
+  const MIN_SETTLE_MS = 350;
 
   async function expandCommentText(scope) {
     let clicks = 0;
@@ -146,12 +146,7 @@
       // Newest is what fetches the thread. Give that round trip a beat
       // before deciding there is nothing to expand.
       if (rendered === 0) {
-        rendered = await waitForComments(
-          element,
-          0,
-          expected > 0 ? Math.max(settleMs, 2500) : settleMs,
-          count
-        );
+        rendered = await waitForComments(element, 0, settleMs, count);
       }
       result.rendered = rendered;
     }

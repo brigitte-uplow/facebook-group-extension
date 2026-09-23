@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Facebook Group Post Scraper",
-  "version": "0.18.24",
+  "version": "0.18.25",
   "description": "Collects Facebook group posts as you scroll and exports them as engagement captures (caption, permalink, comments, metrics).",
   "permissions": [
     "activeTab",
@@ -13,7 +13,7 @@
     "https://*.facebook.com/*",
     "https://*.fb.com/*",
     "http://127.0.0.1/*",
-    "https://uplow-mcp-git-features-upl-567-mcp-uplow-uplow.vercel.app/*"
+    "https://uplow-62qjapth8-uplow.vercel.app/*"
   ],
   "background": {
     "service_worker": "src/background.js"

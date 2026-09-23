@@ -268,6 +268,11 @@ function uploadLine(status) {
   }
   if (last) return { text: `Stored ${last.stored} capture(s) in Uplow.`, kind: "ok" };
   if ((status.reachedCutoff || status.walkFinished) && status.collected) {
+    const outstanding = (status.queue?.pending || 0) + (status.queue?.inFlight || 0);
+    const held = status.queue?.held || 0;
+    if (status.drainingComments || outstanding || held) {
+      return { text: "Posts upload to Uplow when the comment queue finishes.", kind: "" };
+    }
     return { text: "Sending the saved posts to Uplow…", kind: "" };
   }
   if (!destination?.url || !destination?.key) {

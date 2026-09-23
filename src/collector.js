@@ -2,7 +2,7 @@
   const S = globalThis.__fbGroupScraper;
   if (!S) return;
 
-  const VERSION = "0.18.21";
+  const VERSION = "0.18.25";
   const HARVEST_DEBOUNCE_MS = 400;
   const SCROLL_THROTTLE_MS = 600;
   const RENDER_DEBOUNCE_MS = 250;
@@ -31,7 +31,6 @@
   const PAINT_STABLE_SAMPLES = 2;
   const MAX_PAINT_WAIT_MS = 1600;
   const MIN_FEED_FILL = 0.7;
-  const BURST_LAG_LIMIT = 4;
   const LANDING_MIN_RATIO = 0.05;
   const LANDING_MAX_RATIO = 0.4;
   // Longer posts hold the eye longer, up to a point.
@@ -867,11 +866,39 @@
     persistNow();
     return { applied: true, comments: comments.length };
   }
+  function noteQueueCleared(lanes) {
+    state.queueEpoch += 1;
+    state.queued.clear();
+    state.queuedPostIds = new Set();
+    state.queueSeenAt = Date.now();
+    state.queue = { pending: 0, inFlight: 0, failed: 0, parked: 0, lanes: lanes || 1 };
+  }
+
+  // Jobs left on the worker after every post has already been released. They
+  // are not a comment read anyone is waiting on — a finished job written back
+  // to disk, then loaded again — and waiting on them is what keeps the popup
+  // on "8 queued" and holds the upload back.
+  async function dropQueueIfNothingHeld() {
+    if (state.autoScrolling || state.stopped || state.stopRequested) return false;
+    if (hasHeldPosts()) return false;
+    // Flush first so a result that is already back still lands on its post.
+    // Then drop the queue even when this tab's copy looks empty: the leftover
+    // jobs are often only on disk, and resume would load them and keep the
+    // count stuck.
+    await askBackground({ type: "flushComments", groupKey: state.groupKey });
+    if (hasHeldPosts()) return false;
+    const queue = await refreshQueueStatus();
+    await askBackground({ type: "clearQueue", groupKey: state.groupKey });
+    noteQueueCleared(queue.lanes);
+    return true;
+  }
+
   async function waitForQueue(maxMs = PENDING_COMMENTS_MAX_MS) {
     const deadline = Date.now() + maxMs;
     while (Date.now() < deadline && !state.stopped && !state.stopRequested) {
       const queue = await refreshQueueStatus();
       if (!queue.pending && !queue.inFlight) return true;
+      if (await dropQueueIfNothingHeld()) return true;
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
     return false;
@@ -1005,9 +1032,10 @@
     let permalink = null;
     try {
       if (!element.isConnected) return countedFailure(element, permalink, outcome);
-      if (expandWhileCollecting && S.hasTruncatedText(element)) {
+      // Always wait for the caption to settle, even on a fast burst: See more
+      // often paints a beat after the card, and the expanded text arrives later.
+      if (expandWhileCollecting) {
         await S.expandText(element);
-        await S.sleep(200);
       }
       if (!element.isConnected) return countedFailure(element, permalink, outcome);
       if (!S.pageStatePostId?.(element)?.id) {
@@ -1522,16 +1550,16 @@
   }
   async function scrollBurst(deadline) {
     const { sleep, now } = S.motion;
-    const ceiling = Math.round(
-      ((window.innerHeight || 0) * BURST_TRAVEL_RATIO) / Math.min(1.35, Math.max(1, S.lag()))
-    );
+    // One viewport per burst, for the whole run. Caption expansion happens
+    // after the flick, in harvest. It must not shorten this distance: a busy
+    // main thread used to raise lag and each later swipe covered less ground.
+    const ceiling = Math.round((window.innerHeight || 0) * BURST_TRAVEL_RATIO);
     const flicks = S.randInt(...BURST_FLICKS);
     let travelled = 0;
 
     for (let flick = 0; flick < flicks; flick += 1) {
       const room = ceiling > 0 ? ceiling - travelled : Infinity;
       if (room <= 0) break;
-      if (flick > 0 && S.lag() >= BURST_LAG_LIMIT) break;
       const distance = Math.min(S.randInt(FLICK_MIN_PX, FLICK_MAX_PX), room);
       await S.glideBy(distance, { minTickMs: FLICK_TICK_MS[0], maxTickMs: FLICK_TICK_MS[1] });
       travelled += distance;
@@ -1811,13 +1839,18 @@
         // after a long scroll. Rebuild the queue before asking it to drain.
         await enqueueHeldJobs();
         restartPendingClocks();
-        await askBackground({
-          type: "resumeQueue",
-          groupKey: state.groupKey,
-          start: true,
-        });
-        await waitForQueue(DRAIN_MAX_MS);
-        await waitForHeld();
+        // Nothing held means the threads are already on the captures. Opening
+        // the worker again only reloads leftover jobs and leaves the queue
+        // count stuck while the upload waits.
+        if (!(await dropQueueIfNothingHeld())) {
+          await askBackground({
+            type: "resumeQueue",
+            groupKey: state.groupKey,
+            start: true,
+          });
+          await waitForQueue(DRAIN_MAX_MS);
+          await waitForHeld();
+        }
         if (state.stopRequested) return null;
         await askBackground({ type: "stopRun", groupKey: state.groupKey });
         state.queueStopped = true;

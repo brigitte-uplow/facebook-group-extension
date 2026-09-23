@@ -480,6 +480,10 @@ const resultsKey = (groupKey) => `commentResults:${groupKey || "unknown"}`;
 // Bumped by Clear so a persist that started with the old jobs cannot write
 // them back after the queue has been thrown away.
 const queueEpoch = new Map();
+// Bumped on every persist. A slow write must not put finished jobs back on
+// disk after a later persist already removed them — that is how a queue of
+// posts whose comments already landed shows up again as still queued.
+const persistGen = new Map();
 // In lane order, so a Stop parks what was running ahead of what was merely
 // queued behind it, whichever lane happened to be holding it.
 const runningJobs = (groupKey) =>
@@ -491,19 +495,26 @@ const runningJobs = (groupKey) =>
 async function persistQueue(groupKey) {
   if (!groupKey) return;
   const epoch = queueEpoch.get(groupKey) || 0;
+  const gen = (persistGen.get(groupKey) || 0) + 1;
+  persistGen.set(groupKey, gen);
   const running = runningJobs(groupKey);
   const parked = [...running, ...jobs.filter((job) => job.groupKey === groupKey)];
   try {
     if ((queueEpoch.get(groupKey) || 0) !== epoch) return;
+    if ((persistGen.get(groupKey) || 0) !== gen) return;
     if (!parked.length) {
       await chrome.storage.local.remove(queueKey(groupKey));
-      return;
+    } else {
+      await chrome.storage.local.set({ [queueKey(groupKey)]: { jobs: parked, at: Date.now() } });
     }
-    await chrome.storage.local.set({ [queueKey(groupKey)]: { jobs: parked, at: Date.now() } });
     // A Clear that landed during the write left the old jobs on disk; drop them.
     if ((queueEpoch.get(groupKey) || 0) !== epoch) {
       await chrome.storage.local.remove(queueKey(groupKey));
+      return;
     }
+    // A newer snapshot finished around this write. The bytes just stored may
+    // be the older queue, so write whatever the queue is now.
+    if ((persistGen.get(groupKey) || 0) !== gen) return persistQueue(groupKey);
   } catch {
     // A quota or a teardown. The queue in memory is still the live one.
   }

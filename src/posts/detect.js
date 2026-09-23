@@ -128,16 +128,50 @@
     );
   }
 
+  // A long walk used to re-read every article still mounted, including ones
+  // many screens back. innerText on that set gets slower the further the feed
+  // has gone, and that work sat between swipes. Two screens of lookbehind is
+  // enough for a burst that overshoots; posts further up were harvested when
+  // they were on screen.
+  function nearViewport(node) {
+    const height = window.innerHeight || 0;
+    if (!height || !node?.getBoundingClientRect) return true;
+    const rect = node.getBoundingClientRect();
+    if (rect.height <= 0 && rect.width <= 0) return false;
+    return rect.bottom > -height * 2 && rect.top < height * 2;
+  }
+
+  function scopesNearFeed(feed) {
+    const children = Array.from(feed.children).filter((node) => node.tagName === "DIV");
+    const near = children.filter((node) => nearViewport(node));
+    // One wrapper around the whole feed still intersects the screen. Only
+    // then do we search inside it; otherwise posts many screens back are
+    // left out of this pass.
+    if (!near.length || near.length === children.length) return [feed];
+    return near;
+  }
+
   function detectPosts() {
     const feed = getFeed();
     const strategies = {};
+    const scopes = scopesNearFeed(feed);
 
-    strategies.articles = Array.from(document.querySelectorAll('div[role="article"]')).filter(
-      (node) => !isCommentArticle(node)
+    strategies.articles = scopes.flatMap((scope) =>
+      Array.from(scope.querySelectorAll('div[role="article"]')).filter(
+        (node) => nearViewport(node) && !isCommentArticle(node)
+      )
     );
-    strategies.feedChildren = Array.from(feed.children).filter((node) => node.tagName === "DIV");
+    strategies.feedChildren = Array.from(feed.children).filter(
+      (node) => node.tagName === "DIV" && nearViewport(node)
+    );
     strategies.permalinks = Array.from(
-      new Set(postAnchors(feed).map((anchor) => climbToPostRoot(anchor, feed)))
+      new Set(
+        scopes.flatMap((scope) =>
+          postAnchors(scope)
+            .filter((anchor) => nearViewport(anchor))
+            .map((anchor) => climbToPostRoot(anchor, feed))
+        )
+      )
     ).filter(Boolean);
 
     const pool = [

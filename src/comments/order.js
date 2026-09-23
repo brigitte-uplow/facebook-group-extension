@@ -153,11 +153,11 @@
     return null;
   }
 
-  const ORDER_CONTROL_WAIT_MS = 12000;
-  const ORDER_VERIFY_MS = 8000;
-  const ORDER_REFETCH_MS = 2500;
-  const ORDER_POLL_MS = 200;
-  const ORDER_RETRIES = 4;
+  const ORDER_CONTROL_WAIT_MS = 5000;
+  const ORDER_VERIFY_MS = 3500;
+  const ORDER_REFETCH_MS = 1200;
+  const ORDER_POLL_MS = 150;
+  const ORDER_RETRIES = 2;
 
   function waitFor(check, timeoutMs) {
     return new Promise((resolve) => {
@@ -233,17 +233,17 @@
       host = found.host;
       const before = orderSnapshot(scopeOf());
       openOrderMenu(trigger, host);
-      await sleep(randInt(450, 900));
+      await sleep(randInt(180, 320));
       let item = findCommentOrderItem(choices, trigger);
       if (!item && host && host !== trigger && host.isConnected) {
         clickWithoutNavigating(host);
-        await sleep(randInt(450, 900));
+        await sleep(randInt(180, 320));
         item = findCommentOrderItem(choices, trigger);
       }
       if (!item) {
         closeMenus();
         reason = "choice_not_offered";
-        await sleep(randInt(400, 700));
+        await sleep(randInt(200, 400));
         continue;
       }
       chosen = orderLabel(item);
@@ -269,12 +269,12 @@
         // Newest is a network round trip, same as switching the feed to New
         // posts: give Facebook a beat to paint the thread before the walker
         // decides the dialog is empty.
-        if (!changed) await sleep(randInt(2000, 3500));
+        if (!changed) await sleep(randInt(400, 700));
         return { order: chosen, verified: true, reason: null, refetched: changed };
       }
       reason = "not_verified";
       closeMenus();
-      await sleep(randInt(400, 700));
+      await sleep(randInt(200, 400));
     }
 
     return { order: chosen, verified: false, reason };

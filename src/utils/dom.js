@@ -25,8 +25,11 @@
   function findButtons(element, pattern) {
     return Array.from(element.querySelectorAll('[role="button"], [role="link"]')).filter(
       (button) => {
-        const text = `${button.textContent || ""} ${button.getAttribute("aria-label") || ""}`.trim();
-        return pattern.test(text);
+        // Tested apart: a "See more" whose aria-label is also "See more" used
+        // to become "See more See more" and fail the exact-match pattern.
+        const text = normalizeWhitespace(button.textContent || "");
+        const aria = normalizeWhitespace(button.getAttribute("aria-label") || "");
+        return pattern.test(text) || pattern.test(aria);
       }
     );
   }

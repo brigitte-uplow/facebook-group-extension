@@ -5,7 +5,7 @@
 // written down, so the modules that walk the page can be read without a regex
 // in the way. Loaded before every other scraper half.
 (() => {
-  const VERSION = "0.18.1";
+  const VERSION = "0.18.2";
   const PLATFORM = "facebook_group";
   const SCHEMA_VERSION = 2;
   const EXTRACTOR_VERSION = `fb-group-scraper@${VERSION}`;
@@ -71,7 +71,8 @@
   const TOMBSTONE_PATTERN =
     /this content isn.t available right now|when this happens, it.s usually because the owner/i;
   // The control Facebook renders where it has truncated a post or a comment.
-  const SEE_MORE_PATTERN = /^see more$/i;
+  // Trailing dots are kept: some cards paint "See more..." rather than the bare words.
+  const SEE_MORE_PATTERN = /^see more[.…]*$/i;
   const CLICKABLE_SELECTOR =
     '[role="button"], [role="link"], [role="combobox"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="radio"], [aria-haspopup], [tabindex]';
   const MENU_SELECTOR =
