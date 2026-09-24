@@ -1,12 +1,14 @@
 // The worker tab's half: a whole thread, read on the post's own permalink.
 //
 // A permalink usually opens the post in a dialog, but not always — some routes
-// render it into the main column instead — so the wait accepts either. The
-// budget is longer than the feed's, because this tab exists only to finish the
-// one thread the feed could not. Loaded after src/comments/capture.js.
+// render it into the main column instead — so the wait accepts either. A photo
+// permalink is the third shape: the picture fills role="main" and the thread
+// is the column beside it, which is what gets read. The budget is longer than
+// the feed's, because this tab exists only to finish the one thread the feed
+// could not. Loaded after src/comments/capture.js.
 (() => {
   const { findPostDialog, scrollPane } = globalThis.__fbGroupDom;
-  const { isCommentArticle } = globalThis.__fbGroupPostDetect;
+  const { isCommentArticle, photoCommentColumn } = globalThis.__fbGroupPostDetect;
   const { getComments } = globalThis.__fbGroupCommentExtract;
   const { setCommentOrder } = globalThis.__fbGroupCommentOrder;
   const {
@@ -57,13 +59,19 @@
   }
 
   const threadScope = () =>
-    findPostDialog() || document.querySelector('div[role="main"]') || document.body || null;
+    findPostDialog() ||
+    photoCommentColumn() ||
+    document.querySelector('div[role="main"]') ||
+    document.body ||
+    null;
 
   // Dialog chrome without comments is not a thread. Hidden worker tabs often
   // paint the shell first and the comments seconds later; starting the walk on
-  // the shell is how a post Facebook says has comments is read as empty.
+  // the shell is how a post Facebook says has comments is read as empty. A
+  // photo page is ready once its comment column is up, not when the picture is.
   function threadShell() {
     if (findPostDialog()) return true;
+    if (photoCommentColumn()) return true;
     if (renderedCommentCount(document.body) > 0) return true;
     return null;
   }
@@ -95,8 +103,11 @@
     const host = scope || threadScope();
     if (!host) return [];
     const dialogNow = findPostDialog();
+    const column = dialogNow ? null : photoCommentColumn();
     return getComments(host, 0, scrapedAt, {
-      exclude: dialogNow ? [dialogPostArticle(dialogNow)].filter(Boolean) : [],
+      exclude: [dialogNow ? dialogPostArticle(dialogNow) : column && dialogPostArticle(column)].filter(
+        Boolean
+      ),
     }).comments;
   }
 

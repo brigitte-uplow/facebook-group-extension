@@ -48,7 +48,12 @@
 
   function liveScope(element) {
     if (element?.isConnected) return element;
-    return findPostDialog() || document.querySelector('div[role="main"]') || document.body;
+    return (
+      findPostDialog() ||
+      globalThis.__fbGroupPostDetect.photoCommentColumn?.() ||
+      document.querySelector('div[role="main"]') ||
+      document.body
+    );
   }
 
   // Same idea as the feed-order helper: a nested article that contains a feed
@@ -64,9 +69,12 @@
 
   // The feed chip is "Most relevant" too. It sits on the page, outside posts
   // and outside the permalink dialog; clicking it would remount the group
-  // instead of fetching this thread.
+  // instead of fetching this thread. On a photo page the same words label the
+  // thread, in the column beside the picture.
   function isFeedOrderChip(node) {
-    return Boolean(node) && !insideDialog(node) && !insidePostArticle(node);
+    if (!node || insideDialog(node) || insidePostArticle(node)) return false;
+    const column = globalThis.__fbGroupPostDetect.photoCommentColumn?.();
+    return !column || !column.contains(node);
   }
 
   // controlsLabelled climbs to the nearest clickable, which inside a post is

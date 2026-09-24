@@ -1095,6 +1095,30 @@
     }
     return null;
   }
+  const postSurfaceOpen = () =>
+    Boolean(S.findPostDialog()) ||
+    /multi_permalinks=|[?&](?:comment_id|fbid|story_fbid)=/.test(location.search || "");
+
+  // A post the walk itself opened. Closed here so the scroll does not stop on it.
+  async function closeOpenedPost() {
+    const dialog = S.findPostDialog();
+    const close = dialog?.querySelector?.('[aria-label="Close" i], [aria-label="Loka" i]');
+    if (close) close.click();
+    else {
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          code: "Escape",
+          keyCode: 27,
+          which: 27,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    }
+    await S.sleep(S.randInt(200, 400));
+  }
+
   async function collectPost(element) {
     const outcome = { complete: false, added: 0, updated: 0, ended: false };
     const { includeComments, maxCommentsPerPost, expandWhileCollecting, loadFullComments } =
@@ -1105,6 +1129,9 @@
       if (!element.isConnected) return countedFailure(element, permalink, outcome);
       // Always wait for the caption to settle, even on a fast burst: See more
       // often paints a beat after the card, and the expanded text arrives later.
+      // Either of these can still open a post; an open post ends the walk, so
+      // one that was not open before this card is closed before scrolling on.
+      const openedBefore = postSurfaceOpen();
       if (expandWhileCollecting) {
         await S.expandText(element);
       }
@@ -1113,6 +1140,7 @@
         await S.revealPermalink(element).catch(() => null);
         if (!element.isConnected) return countedFailure(element, permalink, outcome);
       }
+      if (!openedBefore && postSurfaceOpen()) await closeOpenedPost();
       const parsed = S.parsePost(element, {
         includeComments,
         maxCommentsPerPost,

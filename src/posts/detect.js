@@ -45,6 +45,40 @@
   const outsideComments = (nodes, roots) =>
     roots.length ? nodes.filter((node) => !roots.some((root) => root.contains(node))) : nodes;
 
+  // A photo permalink paints the picture in role="main" and the thread in the
+  // column beside it. There is no dialog. Scope the walk to that column so the
+  // picture is not what gets read.
+  function photoCommentColumn() {
+    if (globalThis.__fbGroupDom.findPostDialog()) return null;
+    if (!globalThis.__fbGroupLinks.isPhotoViewerUrl(location.href)) return null;
+
+    const articles = commentRoots(document.body);
+    if (!articles.length) {
+      return (
+        Array.from(document.querySelectorAll('[role="complementary"]')).find((node) =>
+          /comment/i.test(node.getAttribute("aria-label") || "")
+        ) || null
+      );
+    }
+
+    let node = articles[0];
+    for (const article of articles) {
+      while (node && !node.contains(article)) node = node.parentElement;
+    }
+    if (!node || node === document.body || node === document.documentElement) return null;
+
+    // "Most relevant" sits above the first comment. Climb until the parent is
+    // the split that also holds the photo, so the chip stays inside the scope.
+    let column = node;
+    for (let step = 0; column.parentElement && step < 8; step += 1) {
+      const parent = column.parentElement;
+      if (parent === document.body || parent === document.documentElement) break;
+      if (parent.querySelector(':scope > [role="main"]')) break;
+      column = parent;
+    }
+    return column;
+  }
+
   function getFeed() {
     return (
       document.querySelector('div[role="feed"]') ||
@@ -193,6 +227,7 @@
     nestedArticleRoots,
     timestampExcludeRoots,
     outsideComments,
+    photoCommentColumn,
     getFeed,
     isTombstone,
     looksLikePost,

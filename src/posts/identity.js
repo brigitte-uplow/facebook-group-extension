@@ -21,7 +21,7 @@
     COMMENT_ID_PATTERN,
   } = globalThis.__fbGroupPatterns;
   const { postAnchors, isForeignGroupUrl } = globalThis.__fbGroupLinks;
-  const { POINT_AT_EVENTS, POINT_AWAY_EVENTS, dispatchPointerEvents } = globalThis.__fbGroupDom;
+  const { POINT_AT_EVENTS, POINT_AWAY_EVENTS } = globalThis.__fbGroupDom;
   const { commentRoots, outsideComments } = globalThis.__fbGroupPostDetect;
   const { headerNodes, anchorTimestampLabels } = globalThis.__fbGroupPostTimestamp;
 
@@ -48,6 +48,36 @@
   }
 
   const MEDIA_HREF_PATTERN = /\/photo(?:\.php)?\/|[?&]fbid=|\/videos\/|\/reel\/|\/watch\//;
+  const PRESS_EVENTS = ["click", "auxclick", "mousedown", "mouseup", "pointerdown", "pointerup"];
+
+  // Hover only. No mousedown, mouseup, or click — those open the post.
+  function hoverAt(node, types) {
+    for (const type of types) {
+      const bubbles = !/(enter|leave)$/.test(type);
+      const EventClass = type.startsWith("pointer") && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
+      node.dispatchEvent(
+        new EventClass(type, {
+          bubbles,
+          cancelable: true,
+          view: window,
+          button: 0,
+          buttons: 0,
+          detail: 0,
+        })
+      );
+    }
+  }
+
+  function holdClicks(node) {
+    const swallow = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    for (const type of PRESS_EVENTS) node.addEventListener(type, swallow, true);
+    return () => {
+      for (const type of PRESS_EVENTS) node.removeEventListener(type, swallow, true);
+    };
+  }
 
   async function revealPermalink(element, { timeoutMs = 600, pollMs = 100 } = {}) {
     const existing = getPermalink(element);
@@ -61,12 +91,16 @@
     const targets = (timestampAnchors ? timestampAnchors(element, roots) : [])
       .filter((node) => node.isConnected)
       .filter((node) => {
+        // The picture opens on hover. The timestamp is the one Facebook fills
+        // with the permalink, so it is still pointed at, even when its href is
+        // already a photo link.
         const href = node.getAttribute?.("href") || "";
         return !MEDIA_HREF_PATTERN.test(href) || anchorLooksTimestamped(node);
       });
     if (!targets.length) return null;
 
-    for (const node of targets) dispatchPointerEvents(node, POINT_AT_EVENTS);
+    const release = targets.map(holdClicks);
+    for (const node of targets) hoverAt(node, POINT_AT_EVENTS);
     try {
       const deadline = Date.now() + timeoutMs;
       for (;;) {
@@ -78,8 +112,9 @@
       }
     } finally {
       for (const node of targets) {
-        if (node.isConnected) dispatchPointerEvents(node, POINT_AWAY_EVENTS);
+        if (node.isConnected) hoverAt(node, POINT_AWAY_EVENTS);
       }
+      for (const undo of release) undo();
     }
   }
 

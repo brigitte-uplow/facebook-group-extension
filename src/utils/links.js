@@ -75,6 +75,18 @@
     }
   }
 
+  // facebook.com/photo/?fbid=… is the photo theater: the picture fills the
+  // page and the comments sit in a side column. That is not a post dialog.
+  function isPhotoViewerUrl(href) {
+    if (!href) return false;
+    try {
+      const url = new URL(href, location.origin);
+      return /\/photo(?:\.php)?\/?$/.test(url.pathname);
+    } catch {
+      return false;
+    }
+  }
+
   globalThis.__fbGroupLinks = Object.freeze({
     postAnchors,
     groupSlug,
@@ -82,5 +94,6 @@
     handleFromProfileUrl,
     isProfileOnlyLink,
     commentParentUrl,
+    isPhotoViewerUrl,
   });
 })();
