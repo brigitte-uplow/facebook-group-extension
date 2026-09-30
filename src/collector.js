@@ -2,7 +2,7 @@
   const S = globalThis.__fbGroupScraper;
   if (!S) return;
 
-  const VERSION = "0.18.26";
+  const VERSION = "0.18.27";
   const HARVEST_DEBOUNCE_MS = 400;
   const SCROLL_THROTTLE_MS = 600;
   const RENDER_DEBOUNCE_MS = 250;
@@ -543,6 +543,10 @@
   // Draining a long queue is a permalink load per post, so the wait at the end
   // of a run is nothing like the wait for one thread.
   const DRAIN_MAX_MS = 1800000;
+  // stopRun's own grace is 15s, then it persists and closes the worker.
+  // Past this the call is not coming back — the persist loop this guards
+  // against — and the posts already read still have to upload.
+  const STOP_RUN_WAIT_MS = 45000;
   const holdingComments = (entry) => Boolean(entry.pendingComments);
   const hasHeldPosts = () => {
     for (const entry of state.entries.values()) if (holdingComments(entry)) return true;
@@ -578,12 +582,23 @@
     const fresh = seenAt !== null && Date.now() - seenAt < QUEUE_READING_MAX_AGE_MS;
     const now = Date.now();
 
+    const queue = state.queue || {};
+    const queueBusy =
+      (queue.pending || 0) + (queue.inFlight || 0) + (queue.onDisk || 0) > 0;
     for (const entry of state.entries.values()) {
       const pending = entry.pendingComments;
       if (!pending) continue;
       const waited = now - (Number(pending.at) || now);
       if (waited < PENDING_GRACE_MS) continue;
-      const owed = !fresh || Boolean(state.queuedPostIds?.has(pending.postId));
+      const owed =
+        (state.drainingComments && queueBusy) ||
+        !fresh ||
+        Boolean(state.queuedPostIds?.has(pending.postId));
+      // While the drain is still the thing responsible for these posts, a
+      // clock must not file them comments:worker_lost / comments:worker_timeout.
+      // That fired when persistQueue was wedged and DRAIN_MAX_MS had run out,
+      // and the threads were dropped before the worker read them.
+      if (state.drainingComments && owed) continue;
       if (owed && waited < PENDING_COMMENTS_MAX_MS) continue;
       entry.pendingComments = null;
       entry.capture = {
@@ -884,6 +899,8 @@
       failed: Number(answer.failed) || 0,
       parked: Number(answer.parked) || 0,
       lanes: Number(answer.lanes) || 1,
+      onDisk: Number(answer.onDisk) || 0,
+      stopping: Boolean(answer.stopping),
     };
     // Which posts the queue still owes an answer for, and when that was last
     // true. Kept off the status object: it is evidence for the hold, not a
@@ -942,7 +959,15 @@
     state.queued.clear();
     state.queuedPostIds = new Set();
     state.queueSeenAt = Date.now();
-    state.queue = { pending: 0, inFlight: 0, failed: 0, parked: 0, lanes: lanes || 1 };
+    state.queue = {
+      pending: 0,
+      inFlight: 0,
+      failed: 0,
+      parked: 0,
+      lanes: lanes || 1,
+      onDisk: 0,
+      stopping: false,
+    };
   }
 
   // Jobs left on the worker after every post has already been released. They
@@ -968,12 +993,44 @@
     const deadline = Date.now() + maxMs;
     while (Date.now() < deadline && !state.stopped && !state.stopRequested) {
       const queue = await refreshQueueStatus();
-      if (!queue.pending && !queue.inFlight) return true;
+      const pending = queue.pending || 0;
+      const inFlight = queue.inFlight || 0;
+      // On disk only, with posts still waiting: not an empty queue. Ending
+      // the wait lets those posts' neighbours upload; the jobs stay for resume.
+      const parkedOnly = !pending && !inFlight && (queue.onDisk || 0) > 0 && hasHeldPosts();
+      if (!pending && !inFlight && !parkedOnly) return true;
+      // The worker has been told to stop and nothing is in a lane. Waiting
+      // out the rest of the drain budget cannot read what is left.
+      if (queue.stopping && !inFlight) return false;
+      if (parkedOnly) return false;
       if (await dropQueueIfNothingHeld()) return true;
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
     return false;
   }
+  function heldCount() {
+    let held = 0;
+    for (const entry of state.entries.values()) if (holdingComments(entry)) held += 1;
+    return held;
+  }
+
+  function settleWithin(promise, ms, fallback) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve(fallback);
+      }, ms);
+      Promise.resolve(promise).then((value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      });
+    });
+  }
+
   async function waitForHeld(maxMs = 20000) {
     const deadline = Date.now() + maxMs;
     while (Date.now() < deadline && !state.stopped && !state.stopRequested) {
@@ -1676,6 +1733,7 @@
     state.walkFinished = false;
     state.drainingComments = false;
     state.finishPromise = null;
+    state.drainContinuations = 0;
     // Parked jobs are not drained here. Starting a walk used to ask for them,
     // which opened the worker seconds into the run and remounted the tab it was
     // walking — the reload this whole design exists to avoid. They wait with
@@ -1981,6 +2039,8 @@
   async function finishRun() {
     // Phase two. The walk is over. Worker permalinks remount the feed tab;
     // that is expected and must not park the queue or abandon the upload.
+    if (state.stopped) return { error: STOPPED_MESSAGE };
+    if (state.stopRequested) return null;
     if (state.finishPromise) return state.finishPromise;
     state.walkFinished = true;
     state.drainingComments = true;
@@ -1996,6 +2056,7 @@
         // Nothing held means the threads are already on the captures. Opening
         // the worker again only reloads leftover jobs and leaves the queue
         // count stuck while the upload waits.
+        const waitStarted = Date.now();
         if (!(await dropQueueIfNothingHeld())) {
           await askBackground({
             type: "resumeQueue",
@@ -2006,18 +2067,84 @@
           await waitForHeld();
         }
         if (state.stopRequested) return null;
-        await askBackground({ type: "stopRun", groupKey: state.groupKey });
-        state.queueStopped = true;
-        releaseUnreadHolds();
-        // Parked jobs are not a live queue once every post has been released.
-        // Leaving them counted is what the popup showed as still queued
-        // during the send.
-        if (!hasHeldPosts()) {
+        // stopRun writes the memory queue. Jobs that exist only on disk
+        // would be deleted by that write; load them first when a post is
+        // still waiting, so the park keeps the threads.
+        const beforeStop = await refreshQueueStatus();
+        if (
+          hasHeldPosts() &&
+          !(beforeStop?.pending || beforeStop?.inFlight) &&
+          (beforeStop?.onDisk || 0) > 0
+        ) {
+          await askBackground({
+            type: "resumeQueue",
+            groupKey: state.groupKey,
+            start: false,
+          });
+        }
+        // Bounded so a persist that never settles cannot hold the upload.
+        // An empty or parked queue makes stopRun return as soon as the
+        // snapshot is stored; the bound only fires when it does not.
+        await settleWithin(
+          askBackground({ type: "stopRun", groupKey: state.groupKey }),
+          STOP_RUN_WAIT_MS,
+          { timedOut: true }
+        );
+        const queue = await settleWithin(refreshQueueStatus(), STOP_RUN_WAIT_MS, null);
+        const plan = globalThis.drainSettlePlan({
+          pending: queue?.pending,
+          inFlight: queue?.inFlight,
+          onDisk: queue?.onDisk,
+          held: heldCount(),
+          queueKnown: queue != null,
+        });
+        // releaseUnread is comments:worker_lost on every post still held.
+        // Only when the queue has nothing left for them — a timeout used to
+        // do it anyway, and clearQueue then threw the jobs away.
+        if (plan.releaseUnread) releaseUnreadHolds();
+        state.queueStopped = plan.queueStopped;
+        if (plan.clearQueue && !hasHeldPosts()) {
           await askBackground({ type: "clearQueue", groupKey: state.groupKey });
           noteQueueCleared();
         }
-        markDrainEnd();
-        return await uploadAndMaybeRetry();
+        if (plan.queueStopped) state.drainContinuations = 0;
+        // Nothing whole yet: uploading would record "stored 0" and clear the
+        // drain flag while every post is still waiting on its thread.
+        let uploaded = null;
+        if (plan.queueStopped || heldCount() < state.entries.size) {
+          markDrainEnd();
+          uploaded = await uploadAndMaybeRetry();
+        }
+        // Jobs are still queued for posts still held. Store already ran for
+        // the posts that were whole. Continue the drain in this tab — the
+        // popup is closed for almost the whole run, so it cannot be the
+        // thing that resumes. A wait that returned immediately backs off,
+        // and a handful of continuations is the cap, so a queue that cannot
+        // be loaded does not spin.
+        const keepJobs = !plan.queueStopped && hasHeldPosts() && !state.stopRequested && !state.stopped;
+        if (keepJobs) {
+          state.drainContinuations = (state.drainContinuations || 0) + 1;
+          if (state.drainContinuations <= 3) {
+            state.drainingComments = true;
+            if (state.timing) state.timing.drainEndedAt = null;
+            await setDrainFlag(true);
+            persistNow();
+            const delay = Date.now() - waitStarted < 2000 ? 5000 : 0;
+            setTimeout(() => {
+              if (state.stopRequested || state.stopped) return;
+              finishRun().catch(() => {});
+            }, delay);
+          } else {
+            // Stop scheduling from here. Leave the flag down so a remount
+            // or the popup can continue, without marking the threads lost.
+            state.drainContinuations = 0;
+            state.drainingComments = false;
+            state.queueStopped = false;
+            await setDrainFlag(false);
+            persistNow();
+          }
+        }
+        return uploaded;
       } finally {
         state.finishPromise = null;
       }

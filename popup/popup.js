@@ -53,6 +53,7 @@ const CONTENT_SCRIPTS = [
   "src/comments/permalink.js",
   "src/feed-order.js",
   "src/scraper.js",
+  "src/queue-control.js",
   "src/collector.js",
 ];
 

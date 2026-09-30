@@ -5,6 +5,7 @@ try {
 }
 
 importScripts("/src/parse-tool-content.js");
+importScripts("/src/queue-control.js");
 const MAX_CAPTURES_PER_INGEST = 25;
 
 // The scraper's halves, in the order they publish the globals each next one
@@ -34,7 +35,7 @@ const SCRAPER_FILES = [
 
 // The feed tab's half. Injected into one tab when that tab asks — Start, or a
 // trusted scroll — never into every group tab that happens to remount.
-const COLLECTOR_FILES = [...SCRAPER_FILES, "src/collector.js"];
+const COLLECTOR_FILES = [...SCRAPER_FILES, "src/queue-control.js", "src/collector.js"];
 
 function isGroupFeedTab(tab) {
   const url = tab?.url || "";
@@ -501,10 +502,6 @@ const resultsKey = (groupKey) => `commentResults:${groupKey || "unknown"}`;
 // Bumped by Clear so a persist that started with the old jobs cannot write
 // them back after the queue has been thrown away.
 const queueEpoch = new Map();
-// Bumped on every persist. A slow write must not put finished jobs back on
-// disk after a later persist already removed them — that is how a queue of
-// posts whose comments already landed shows up again as still queued.
-const persistGen = new Map();
 // In lane order, so a Stop parks what was running ahead of what was merely
 // queued behind it, whichever lane happened to be holding it.
 const runningJobs = (groupKey) =>
@@ -513,33 +510,24 @@ const runningJobs = (groupKey) =>
     .filter(([lane, job]) => job.groupKey === groupKey && !parkedLanes.has(lane))
     .map(([, job]) => job);
 
-async function persistQueue(groupKey) {
-  if (!groupKey) return;
-  const epoch = queueEpoch.get(groupKey) || 0;
-  const gen = (persistGen.get(groupKey) || 0) + 1;
-  persistGen.set(groupKey, gen);
-  const running = runningJobs(groupKey);
-  const parked = [...running, ...jobs.filter((job) => job.groupKey === groupKey)];
-  try {
-    if ((queueEpoch.get(groupKey) || 0) !== epoch) return;
-    if ((persistGen.get(groupKey) || 0) !== gen) return;
-    if (!parked.length) {
+const writeQueueSnapshot = globalThis.createGroupQueueWriter({
+  getEpoch: (groupKey) => queueEpoch.get(groupKey) || 0,
+  getJobs: (groupKey) => [
+    ...runningJobs(groupKey),
+    ...jobs.filter((job) => job.groupKey === groupKey),
+  ],
+  storage: {
+    async remove(groupKey) {
       await chrome.storage.local.remove(queueKey(groupKey));
-    } else {
+    },
+    async set(groupKey, parked) {
       await chrome.storage.local.set({ [queueKey(groupKey)]: { jobs: parked, at: Date.now() } });
-    }
-    // A Clear that landed during the write left the old jobs on disk; drop them.
-    if ((queueEpoch.get(groupKey) || 0) !== epoch) {
-      await chrome.storage.local.remove(queueKey(groupKey));
-      return;
-    }
-    // A newer snapshot finished around this write. The bytes just stored may
-    // be the older queue, so write whatever the queue is now.
-    if ((persistGen.get(groupKey) || 0) !== gen) return persistQueue(groupKey);
-  } catch {
-    // A quota or a teardown. The queue in memory is still the live one.
-  }
-}
+    },
+  },
+});
+// Coalesced. Overlapping callers share one follow-up write of whatever the
+// queue is when the in-flight write settles. See createQueuePersister.
+const persistQueue = globalThis.createQueuePersister(writeQueueSnapshot);
 
 async function readParkedJobs(groupKey) {
   if (!groupKey) return [];
@@ -557,8 +545,20 @@ const queuedPostIds = () =>
     ...[...inFlight.values()].map((job) => job.postId),
     ...jobs.map((job) => job.postId),
   ]);
-async function loadParkedJobs(groupKey, feedTabId) {
-  if (!groupKey || hydratedGroups.has(groupKey)) return 0;
+function groupQueueInMemory(groupKey) {
+  return (
+    jobs.some((job) => job.groupKey === groupKey) ||
+    [...inFlight.values()].some((job) => job.groupKey === groupKey)
+  );
+}
+
+async function loadParkedJobs(groupKey, feedTabId, options = {}) {
+  if (!groupKey) return 0;
+  // Once per service worker, unless a resume finds memory empty and disk
+  // still holding the jobs. Reloading on every queueComments would put a
+  // finished job back in line while its removal was still being written.
+  const reload = options.reload === true;
+  if (hydratedGroups.has(groupKey) && (!reload || groupQueueInMemory(groupKey))) return 0;
   hydratedGroups.add(groupKey);
   const parked = await readParkedJobs(groupKey);
   const seen = queuedPostIds();
@@ -1043,7 +1043,7 @@ async function resumeQueue(message, sender) {
   const feedTabId = sender?.tab?.id ?? null;
   bindFeedTab(groupKey, feedTabId);
   stopping = false;
-  const restored = await loadParkedJobs(groupKey, feedTabId);
+  const restored = await loadParkedJobs(groupKey, feedTabId, { reload: true });
   await loadUndelivered(groupKey);
   // Reading the parked queue back is not the same as running it. A feed tab
   // announces itself on every page load, and draining there used to mean merely
