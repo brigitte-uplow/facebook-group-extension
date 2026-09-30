@@ -5,7 +5,7 @@
   "description": "Chrome extension (MV3) that parses posts in a Facebook group feed into engagement captures for the Uplow MCP server's ingest_engagement tool. Node is only used to write popup/config.js from .env.local; the extension itself has no build step.",
   "scripts": {
     "config": "node scripts/write-config.mjs",
-    "test": "node --test scripts/queue-control.test.mjs"
+    "test": "node --test scripts/queue-control.test.mjs scripts/run-timing.test.mjs"
   },
   "license": "ISC"
 }
