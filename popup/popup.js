@@ -54,6 +54,7 @@ const CONTENT_SCRIPTS = [
   "src/feed-order.js",
   "src/scraper.js",
   "src/queue-control.js",
+  "src/run-timing.js",
   "src/collector.js",
 ];
 

@@ -35,7 +35,7 @@ const SCRAPER_FILES = [
 
 // The feed tab's half. Injected into one tab when that tab asks — Start, or a
 // trusted scroll — never into every group tab that happens to remount.
-const COLLECTOR_FILES = [...SCRAPER_FILES, "src/queue-control.js", "src/collector.js"];
+const COLLECTOR_FILES = [...SCRAPER_FILES, "src/queue-control.js", "src/run-timing.js", "src/collector.js"];
 
 function isGroupFeedTab(tab) {
   const url = tab?.url || "";

@@ -2,7 +2,7 @@
   const S = globalThis.__fbGroupScraper;
   if (!S) return;
 
-  const VERSION = "0.18.27";
+  const VERSION = "0.18.28";
   const HARVEST_DEBOUNCE_MS = 400;
   const SCROLL_THROTTLE_MS = 600;
   const RENDER_DEBOUNCE_MS = 250;
@@ -218,32 +218,17 @@
   state.uploading = false;
 
   function emptyTiming() {
-    return {
-      collectStartedAt: null,
-      collectEndedAt: null,
-      drainStartedAt: null,
-      drainEndedAt: null,
-      storeStartedAt: null,
-      storeEndedAt: null,
-    };
-  }
-  function stampMs(value) {
-    return typeof value === "number" && Number.isFinite(value) ? value : null;
-  }
-  function restoreTiming(raw) {
-    const timing = emptyTiming();
-    if (!raw || typeof raw !== "object") return timing;
-    for (const key of Object.keys(timing)) timing[key] = stampMs(raw[key]);
-    return timing;
+    return globalThis.emptyRunTiming();
   }
   // Each stamp is written once, so a remount mid-phase keeps the original
   // start. Storing is the exception: a retry moves the end later, and the
-  // wait between attempts counts as part of that phase.
+  // wait between attempts counts as part of that phase. A new Start is the
+  // exception to that exception: it bumps timingGeneration so a storage
+  // read already in flight cannot put the previous run's clock back.
   function markCollectStart(reset) {
-    if (reset || !state.timing?.collectStartedAt || state.timing.collectEndedAt) {
-      state.timing = emptyTiming();
-    }
-    if (!state.timing.collectStartedAt) state.timing.collectStartedAt = Date.now();
+    const begun = globalThis.beginCollect(state.timing, reset, Date.now());
+    if (begun.reset) state.timingGeneration = (state.timingGeneration || 0) + 1;
+    state.timing = begun.timing;
   }
   function markCollectEnd() {
     if (!state.timing) state.timing = emptyTiming();
@@ -688,7 +673,19 @@
     };
   }
 
-  async function hydrate() {
+  // One read at a time. Start awaits this, then sets the clock. A second
+  // call that began earlier must finish before that, or its result lands
+  // on top of the new collectStartedAt.
+  let hydrateChain = Promise.resolve();
+  function hydrate() {
+    const run = hydrateChain.then(() => hydrateFromStorage());
+    hydrateChain = run.then(
+      () => {},
+      () => {}
+    );
+    return run;
+  }
+  async function hydrateFromStorage() {
     const groupKey = groupKeyFromUrl();
     if (!groupKey) return;
     if (state.groupKey !== groupKey) {
@@ -712,6 +709,7 @@
       if (state.hydrated || !hasStorage()) return;
     }
 
+    const timingGeneration = state.timingGeneration || 0;
     const key = storageKey(groupKey);
     const saved = await withStorage(() => chrome.storage.local.get([key]))?.catch(stop);
     if (!saved) {
@@ -734,7 +732,12 @@
     if (typeof stored?.walkFinished === "boolean") state.walkFinished = stored.walkFinished;
     state.drainingComments = Boolean(stored?.drainingComments);
     if (typeof stored?.queueStopped === "boolean") state.queueStopped = stored.queueStopped;
-    if (stored?.timing) state.timing = restoreTiming(stored.timing);
+    state.timing = globalThis.timingAfterHydrate(
+      state.timing,
+      stored?.timing,
+      timingGeneration,
+      state.timingGeneration || 0
+    );
     for (const entry of state.entries.values()) {
       // A buffer written by a build that did not know about the two phases has
       // captures claiming to be full while still waiting on the worker.
@@ -1727,6 +1730,13 @@
   async function autoScroll(options = {}) {
     if (state.autoScrolling) return { error: "Auto-scroll is already running." };
     if (state.stopped) return { error: STOPPED_MESSAGE };
+    const { fromTop = true } = options;
+    // Stored timing has to be in memory before a Start replaces it. Doing
+    // this the other way round let the group's previous collectStartedAt
+    // win the race and the popup add that whole gap into Total time.
+    await hydrate();
+    if (state.stopped) return { error: STOPPED_MESSAGE };
+    if (state.autoScrolling) return { error: "Auto-scroll is already running." };
     state.autoScrolling = true;
     state.stopRequested = false;
     state.queueStopped = false;
@@ -1751,7 +1761,6 @@
     const {
       targetPosts = null,
       maxSeconds = targetPosts === null ? null : budgetSeconds(targetPosts),
-      fromTop = true,
     } = options;
     markCollectStart(fromTop);
     persistNow();
